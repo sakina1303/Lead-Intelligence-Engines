@@ -1,7 +1,28 @@
 {
+  "name": "event-driven-lead-intelligence-engine",
+  "version": "1.0.0",
+  "description": "A deterministic TypeScript domain engine for event-driven lead intelligence.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml",
+    "test:watch": "vitest",
+    "test:junit": "vitest run --reporter=junit --outputFile.junit=reports/junit.xml"
+  },
   "devDependencies": {
-    "@jest/globals": "^30.2.0",
-    "jest": "^30.2.0",
-    "supertest": "^7.2.2"
+    "@types/node": "24.3.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
   }
 }
