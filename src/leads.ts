@@ -46,7 +46,8 @@ export function addLead(state: EngineState, input: CreateLeadInput): Outcome<Eng
 
 export function updateLeadAttributes(state: EngineState, leadId: string, attributes: Readonly<Record<string, string | number | boolean>>, updatedAt: Timestamp): Outcome<EngineState> {
   const lead = state.leads[leadId];
-  const errors = [...(!lead ? [`lead '${leadId}' does not exist`] : []), ...(!validTimestamp(updatedAt) ? ["updatedAt must be valid"] : []), ...validateAttributes(attributes)];
+  if (!lead) return failure(`lead '${leadId}' does not exist`);
+  const errors = [...(!validTimestamp(updatedAt) ? ["updatedAt must be valid"] : []), ...validateAttributes(attributes)];
   if (errors.length > 0) return failure(...errors);
   if (updatedAt < lead.updatedAt) return failure("updatedAt cannot precede the current lead update");
   return success({ ...state, leads: { ...state.leads, [leadId]: { ...lead, attributes: { ...lead.attributes, ...attributes }, updatedAt } } });
