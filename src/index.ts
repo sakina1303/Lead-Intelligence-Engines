@@ -1,4 +1,5 @@
 export * from "./contracts.js";
+export { validateEngineConfig, validateRuleSet } from "./config.js";
 export { createEngine, createLeadInEngine, processEvent, refreshLeadIntelligence } from "./engine.js";
 export { processBatch } from "./batch.js";
 export { addLead, allowedLifecycleTransitions, createLead, transitionLifecycle, updateLeadAttributes } from "./leads.js";
