@@ -2,7 +2,7 @@ import type { CreateEventInput, CreateLeadInput, EngineConfig, EngineState, Even
 import { appendEvent, getLeadEvents } from "./event-ledger.js";
 import { addLead } from "./leads.js";
 import { evaluateQualification, selectQualification } from "./qualification.js";
-import { scoreEvent } from "./scoring.js";
+import { replayLeadScoring } from "./replay.js";
 import { assignSegment } from "./segmentation.js";
 import { createEngineState } from "./state.js";
 
@@ -19,8 +19,10 @@ export function processEvent(state: EngineState, input: CreateEventInput, rules:
   const appended = appendEvent(state, input);
   if (!appended.ok) return { state, outcome: "rejected", errors: appended.errors };
   if (appended.value.duplicate) return { state, outcome: "duplicate", event: appended.value.event };
-  const scored = scoreEvent(appended.value.state, appended.value.event, rules);
-  return refreshLeadIntelligence(scored.state, appended.value.event.leadId, evaluatedAt, { event: appended.value.event, explanation: scored.explanation });
+  const replayed = replayLeadScoring(appended.value.state, appended.value.event.leadId, rules);
+  if (!replayed.ok) return { state: appended.value.state, outcome: "rejected", errors: replayed.errors };
+  const explanation = replayed.value.history.find((item) => item.eventId === appended.value.event.id);
+  return refreshLeadIntelligence(replayed.value.state, appended.value.event.leadId, evaluatedAt, explanation === undefined ? { event: appended.value.event } : { event: appended.value.event, explanation });
 }
 
 export function refreshLeadIntelligence(state: EngineState, leadId: string, evaluatedAt: Timestamp, base: Pick<EventProcessResult, "event" | "explanation"> = {}): EventProcessResult {
