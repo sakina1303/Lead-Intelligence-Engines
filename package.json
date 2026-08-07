@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml",
     "test:watch": "vitest",
     "test:junit": "vitest run --reporter=junit --outputFile.junit=reports/junit.xml"
