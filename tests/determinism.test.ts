@@ -8,6 +8,6 @@ describe("deterministic domain operations", () => {
     const inputs = [event(`b-${index}`, { occurredAt: 2 }), event(`a-${index}`, { occurredAt: 1 })];
     const one = processBatch(make(), inputs, rules, index).state;
     const two = processBatch(make(), inputs, rules, index).state;
-    expect({ one, rank: rankLeads(one), summary: summarize(one) }).toEqual({ two, rank: rankLeads(two), summary: summarize(two) });
+    expect({ state: one, rank: rankLeads(one), summary: summarize(one) }).toEqual({ state: two, rank: rankLeads(two), summary: summarize(two) });
   });
 });
