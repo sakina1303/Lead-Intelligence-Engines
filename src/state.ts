@@ -206,15 +206,14 @@ export function decompressAndDeserializeState(compressed: CompressedState): Engi
   const str = Buffer.from(compressed.payload, "base64").toString("utf8");
   const parsed = JSON.parse(str);
   
-  const state = createEngineState(parsed.c);
-  state.leads = parsed.l ?? {};
-  state.events = parsed.e ?? {};
-  state.scores = parsed.s ?? {};
-  state.qualifications = parsed.q ?? {};
+  const leads = parsed.l ?? {};
+  const events = parsed.e ?? {};
+  const scores = parsed.s ?? {};
+  const qualifications = parsed.q ?? {};
   
   // Rebuild indexes
   const eventIdsByLead: Record<string, string[]> = {};
-  for (const [id, event] of Object.entries(state.events)) {
+  for (const [id, event] of Object.entries(events)) {
     if (!eventIdsByLead[(event as any).leadId]) {
        eventIdsByLead[(event as any).leadId] = [];
     }
@@ -223,12 +222,17 @@ export function decompressAndDeserializeState(compressed: CompressedState): Engi
   
   // Sort them just in case
   for (const leadId of Object.keys(eventIdsByLead)) {
-    eventIdsByLead[leadId]!.sort((a, b) => state.events[a]!.occurredAt - state.events[b]!.occurredAt);
+    eventIdsByLead[leadId]!.sort((a, b) => (events as any)[a]!.occurredAt - (events as any)[b]!.occurredAt);
   }
   
-  state.eventIdsByLead = eventIdsByLead;
-  
-  return state;
+  return {
+    ...createEngineState(parsed.c),
+    leads,
+    events,
+    scores,
+    qualifications,
+    eventIdsByLead
+  };
 }
 
 // --- Audit Log Generation ---
