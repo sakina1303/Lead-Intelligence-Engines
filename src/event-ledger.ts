@@ -150,7 +150,6 @@ export function buildTouchPoints(state: EngineState, leadId: string, channelAttr
   
   return events.map(event => {
     const isConversion = event.type === conversionEventType;
-    if (isConversion) foundConversion = true;
     return {
       eventId: event.id,
       leadId: event.leadId,
