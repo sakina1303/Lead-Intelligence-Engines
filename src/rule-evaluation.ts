@@ -71,3 +71,60 @@ export function selectRules(rules: readonly ScoringRule[], mode: "stack" | "high
   if (mode === "stack") return rules;
   return rules.length === 0 ? [] : [rules[0]!];
 }
+
+// AST Rule Evaluator
+export type ASTOperator = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "startsWith" | "endsWith" | "matches";
+export type ASTNodeType = "LogicalExpression" | "BinaryExpression" | "Identifier" | "Literal" | "MemberExpression";
+export interface ASTNode { type: ASTNodeType; }
+export interface Literal extends ASTNode { type: "Literal"; value: string | number | boolean | null; }
+export interface Identifier extends ASTNode { type: "Identifier"; name: string; }
+export interface MemberExpression extends ASTNode { type: "MemberExpression"; object: ASTNode; property: Identifier | Literal; }
+export interface BinaryExpression extends ASTNode { type: "BinaryExpression"; operator: ASTOperator; left: ASTNode; right: ASTNode; }
+export interface LogicalExpression extends ASTNode { type: "LogicalExpression"; operator: "and" | "or"; left: ASTNode; right: ASTNode; }
+
+export function evaluateAST(node: ASTNode, context: Record<string, any>): boolean {
+    if (node.type === "LogicalExpression") {
+        const expr = node as LogicalExpression;
+        const left = evaluateAST(expr.left, context);
+        if (expr.operator === "and" && !left) return false;
+        if (expr.operator === "or" && left) return true;
+        return evaluateAST(expr.right, context);
+    }
+    if (node.type === "BinaryExpression") {
+        const expr = node as BinaryExpression;
+        const leftVal = evaluateNode(expr.left, context);
+        const rightVal = evaluateNode(expr.right, context);
+        switch (expr.operator) {
+            case "eq": return leftVal === rightVal;
+            case "neq": return leftVal !== rightVal;
+            case "gt": return typeof leftVal === 'number' && typeof rightVal === 'number' && leftVal > rightVal;
+            case "gte": return typeof leftVal === 'number' && typeof rightVal === 'number' && leftVal >= rightVal;
+            case "lt": return typeof leftVal === 'number' && typeof rightVal === 'number' && leftVal < rightVal;
+            case "lte": return typeof leftVal === 'number' && typeof rightVal === 'number' && leftVal <= rightVal;
+            case "in": return Array.isArray(rightVal) && rightVal.includes(leftVal);
+            case "contains": return typeof leftVal === 'string' && typeof rightVal === 'string' && leftVal.includes(rightVal);
+            case "startsWith": return typeof leftVal === 'string' && typeof rightVal === 'string' && leftVal.startsWith(rightVal);
+            case "endsWith": return typeof leftVal === 'string' && typeof rightVal === 'string' && leftVal.endsWith(rightVal);
+            case "matches": {
+                if (typeof leftVal !== 'string' || typeof rightVal !== 'string') return false;
+                try { return new RegExp(rightVal).test(leftVal); } catch { return false; }
+            }
+            default: return false;
+        }
+    }
+    return false;
+}
+export function evaluateNode(node: ASTNode, context: Record<string, any>): any {
+    switch (node.type) {
+        case "Literal": return (node as Literal).value;
+        case "Identifier": return context[(node as Identifier).name];
+        case "MemberExpression": {
+            const expr = node as MemberExpression;
+            const obj = evaluateNode(expr.object, context);
+            const prop = expr.property.type === "Identifier" ? expr.property.name : (expr.property as Literal).value;
+            if (obj && typeof obj === 'object') return obj[prop as string];
+            return undefined;
+        }
+        default: return undefined;
+    }
+}
