@@ -435,7 +435,7 @@ export const defaultRuleTemplates: Record<string, SegmentationRuleTemplate> = {
 };
 
 export function generateDynamicPolicy(
-  policyId: string,
+  _policyId: string,
   fallbackSegment: string,
   templates: readonly { templateId: string; params: Record<string, string | number> }[]
 ): AdvancedSegmentPolicy {
