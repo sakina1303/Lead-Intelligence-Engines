@@ -496,6 +496,12 @@ export function computeScoreDistribution(state: EngineState): import("./contract
     return sorted[Math.max(0, Math.min(idx, n - 1))]!;
   };
   
+  return {
+    min: sorted[0]!,
+    max: sorted[n - 1]!,
+    mean,
+    median: n % 2 === 1 ? sorted[Math.floor(n / 2)]! : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2,
+    standardDeviation: Math.sqrt(variance),
     percentiles: {
       p10: percentileAt(10),
       p25: percentileAt(25),
