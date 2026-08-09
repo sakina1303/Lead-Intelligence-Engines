@@ -127,7 +127,6 @@ export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
         if (typeof t.name === "string" && typeof t.value === "number") {
           config.qualificationPolicies.push({
             id: `qual-${t.name.toLowerCase().replace(/\s+/g, "-")}`,
-            targetState: "qualified",
             minimumScore: t.value,
           });
         }
@@ -144,7 +143,7 @@ export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
 
 export class EngineConfigBuilder {
   private config = {
-    scorePolicy: { cap: 1000, floor: 0, conflictMode: "stack" as const },
+    scorePolicy: { cap: 1000, floor: 0, conflictMode: "stack" as "stack" | "highest-priority" | "first-match" },
     qualificationPolicies: [] as import("./contracts.js").QualificationPolicy[],
     segmentPolicy: { fallback: "unsegmented", rules: [] as import("./contracts.js").SegmentRule[] },
   };

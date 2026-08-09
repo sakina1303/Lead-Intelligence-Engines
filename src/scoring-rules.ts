@@ -264,8 +264,6 @@ export class RuleBuilder {
   private name: string = "";
   private priority: number = 0;
   private delta: number = 0;
-  private dimensions: Record<string, number> = {};
-  private tags: string[] = [];
   private eventType?: string;
   private attributes: AttributeCondition[] = [];
   private leadAttributes: AttributeCondition[] = [];
@@ -278,8 +276,6 @@ export class RuleBuilder {
   public withName(name: string): this { this.name = name; return this; }
   public withPriority(prio: number): this { this.priority = prio; return this; }
   public withDelta(delta: number): this { this.delta = delta; return this; }
-  public withDimension(dim: string, val: number): this { this.dimensions[dim] = val; return this; }
-  public withTag(tag: string): this { this.tags.push(tag); return this; }
   
   public matchingEvent(type: string): this { this.eventType = type; return this; }
   
@@ -312,8 +308,6 @@ export class RuleBuilder {
       name: this.name,
       priority: this.priority,
       delta: this.delta,
-      dimensions: Object.keys(this.dimensions).length > 0 ? this.dimensions : undefined,
-      tags: this.tags.length > 0 ? this.tags : undefined,
       condition: {
         ...(this.eventType ? { eventType: this.eventType } : {}),
         ...(this.attributes.length > 0 ? { attributes: this.attributes } : {}),
