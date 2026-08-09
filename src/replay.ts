@@ -60,3 +60,141 @@ export function replayLeadScoring(state: EngineState, leadId: string, rules: rea
 
   return success<ReplayResult>({ state: next, history: next.scoreHistory[leadId] ?? [], ...(impactAnalysis ? { impactAnalysis } : {}) });
 }
+
+// --- Snapshot Isolation and Shadow Execution ---
+
+export interface ShadowExecutionResult {
+  readonly shadowState: EngineState;
+  readonly baseScore: number;
+  readonly shadowScore: number;
+  readonly scoreDelta: number;
+  readonly newlyQualified: boolean;
+  readonly disqualified: boolean;
+}
+
+export function runShadowPolicyExecution(
+  state: EngineState,
+  leadId: string,
+  shadowRules: readonly ScoringRule[],
+  shadowQualificationPolicies: readonly import("./contracts.js").QualificationPolicy[],
+  shadowConfig?: { cap?: number; floor?: number }
+): Outcome<ShadowExecutionResult> {
+  
+  if (!state.leads[leadId]) return failure(`lead '${leadId}' does not exist`);
+  
+  const baseScore = state.scores[leadId] ?? 0;
+  const baseQual = state.qualifications[leadId]?.state ?? "unqualified";
+  
+  const replayResult = replayLeadScoring(state, leadId, shadowRules);
+  if (!replayResult.ok) return replayResult;
+  
+  let shadowState = replayResult.value.state;
+  let shadowScore = shadowState.scores[leadId] ?? 0;
+  
+  if (shadowConfig?.cap !== undefined) shadowScore = Math.min(shadowScore, shadowConfig.cap);
+  if (shadowConfig?.floor !== undefined) shadowScore = Math.max(shadowScore, shadowConfig.floor);
+  
+  // Re-evaluate qualification based on shadow rules and score
+  const events = getLeadEvents(shadowState, leadId);
+  const lead = shadowState.leads[leadId]!;
+  
+  let shadowQualState: string = "unqualified";
+  const sortedQualPolicies = [...shadowQualificationPolicies].sort((a, b) => (b.minimumScore ?? 0) - (a.minimumScore ?? 0));
+  
+  for (const policy of sortedQualPolicies) {
+    if (shadowScore >= (policy.minimumScore ?? 0)) {
+       shadowQualState = policy.qualification;
+       break;
+    }
+  }
+  
+  return success({
+    shadowState: {
+      ...shadowState,
+      scores: { ...shadowState.scores, [leadId]: shadowScore },
+      qualifications: { 
+        ...shadowState.qualifications, 
+        [leadId]: { leadId, policyId: "shadow", state: shadowQualState as any, evaluatedAt: Date.now(), reasons: [] } 
+      }
+    },
+    baseScore,
+    shadowScore,
+    scoreDelta: shadowScore - baseScore,
+    newlyQualified: baseQual === "unqualified" && shadowQualState !== "unqualified",
+    disqualified: baseQual !== "unqualified" && shadowQualState === "unqualified",
+  });
+}
+
+// --- Point-in-Time Recovery and Time-Travel Queries ---
+
+export interface TimeTravelContext {
+  readonly stateAtTime: EngineState;
+  readonly eventsDiscarded: number;
+  readonly restoredScore: number;
+}
+
+export function getStateAtTimestamp(state: EngineState, timestamp: number): TimeTravelContext {
+  // We rebuild the state up to the timestamp. For efficiency in this domain, 
+  // we filter out events that happened after the timestamp and replay the rest.
+  // In a real DB we'd use event sourcing inherently.
+  
+  let timeTravelState: EngineState = {
+    leads: {},
+    events: {},
+    scores: {},
+    eventIdsByLead: {},
+    scoreHistory: {},
+    scoreProjections: {},
+    qualifications: {},
+    segments: {},
+    eventGroups: {},
+    eventPatterns: {},
+    cohortMemberships: {}
+  };
+  
+  let eventsDiscarded = 0;
+  
+  // 1. Rebuild Leads
+  for (const [id, lead] of Object.entries(state.leads)) {
+    if (lead.createdAt <= timestamp) {
+      timeTravelState.leads[id] = lead;
+      timeTravelState.scores[id] = 0;
+      timeTravelState.eventIdsByLead[id] = [];
+      timeTravelState.scoreHistory[id] = [];
+    }
+  }
+  
+  // 2. Rebuild Events
+  const sortedEvents = Object.values(state.events).sort((a, b) => a.occurredAt - b.occurredAt);
+  for (const event of sortedEvents) {
+    if (event.occurredAt <= timestamp) {
+      if (timeTravelState.leads[event.leadId]) {
+         timeTravelState.events[event.id] = event;
+         timeTravelState.eventIdsByLead[event.leadId]!.push(event.id);
+      }
+    } else {
+      eventsDiscarded++;
+    }
+  }
+  
+  // Note: We don't replay the rules here unless explicitly asked via a replay function, 
+  // because we are just querying the base state. The caller can run replayLeadScoring on this state.
+  
+  return {
+    stateAtTime: timeTravelState,
+    eventsDiscarded,
+    restoredScore: 0 // Would be populated if we replayed
+  };
+}
+
+export function replayLeadToTimestamp(state: EngineState, leadId: string, timestamp: number, rules: readonly ScoringRule[]): Outcome<number> {
+  const timeTravelCtx = getStateAtTimestamp(state, timestamp);
+  const timeTravelState = timeTravelCtx.stateAtTime;
+  
+  if (!timeTravelState.leads[leadId]) return failure(`lead '${leadId}' did not exist at timestamp ${timestamp}`);
+  
+  const replayResult = replayLeadScoring(timeTravelState, leadId, rules);
+  if (!replayResult.ok) return replayResult;
+  
+  return success(replayResult.value.state.scores[leadId] ?? 0);
+}
