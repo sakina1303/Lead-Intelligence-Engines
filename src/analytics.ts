@@ -544,3 +544,329 @@ export function extractEventFeatures(events: readonly DomainEvent[]): Readonly<R
   
   return features;
 }
+
+// --- Time Series Decomposition ---
+
+export interface TimeSeriesPoint {
+  readonly timestamp: number;
+  readonly value: number;
+}
+
+export interface DecomposedTimeSeries {
+  readonly trend: readonly number[];
+  readonly seasonal: readonly number[];
+  readonly residual: readonly number[];
+  readonly period: number;
+}
+
+export function decomposeTimeSeries(series: readonly TimeSeriesPoint[], period: number): DecomposedTimeSeries {
+  const n = series.length;
+  if (n < period * 2) {
+    return { trend: new Array(n).fill(0), seasonal: new Array(n).fill(0), residual: new Array(n).fill(0), period };
+  }
+  
+  const values = series.map(p => p.value);
+  const trend = new Array(n).fill(0);
+  
+  // Moving average for trend
+  const halfPeriod = Math.floor(period / 2);
+  for (let i = halfPeriod; i < n - halfPeriod; i++) {
+    let sum = 0;
+    for (let j = -halfPeriod; j <= halfPeriod; j++) {
+      sum += values[i + j]!;
+    }
+    trend[i] = sum / period;
+  }
+  
+  // Detrend
+  const detrended = values.map((v, i) => v - trend[i]!);
+  
+  // Seasonal average
+  const seasonal = new Array(n).fill(0);
+  const seasonalAverages = new Array(period).fill(0);
+  const seasonalCounts = new Array(period).fill(0);
+  
+  for (let i = 0; i < n; i++) {
+    if (i >= halfPeriod && i < n - halfPeriod) {
+      const p = i % period;
+      seasonalAverages[p]! += detrended[i]!;
+      seasonalCounts[p]!++;
+    }
+  }
+  
+  for (let p = 0; p < period; p++) {
+    if (seasonalCounts[p]! > 0) {
+      seasonalAverages[p] = seasonalAverages[p]! / seasonalCounts[p]!;
+    }
+  }
+  
+  // Center seasonal
+  const seasonMean = seasonalAverages.reduce((a, b) => a + b, 0) / period;
+  for (let p = 0; p < period; p++) {
+    seasonalAverages[p] = seasonalAverages[p]! - seasonMean;
+  }
+  
+  for (let i = 0; i < n; i++) {
+    seasonal[i] = seasonalAverages[i % period]!;
+  }
+  
+  // Residuals
+  const residual = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    residual[i] = values[i]! - trend[i]! - seasonal[i]!;
+  }
+  
+  return { trend, seasonal, residual, period };
+}
+
+// --- Anomaly Detection ---
+
+export interface AnomalyResult {
+  readonly pointIndex: number;
+  readonly timestamp: number;
+  readonly value: number;
+  readonly expectedValue: number;
+  readonly deviationScore: number;
+  readonly isAnomaly: boolean;
+}
+
+export function detectAnomalies(series: readonly TimeSeriesPoint[], period: number, sensitivity: number = 3.0): readonly AnomalyResult[] {
+  const decomp = decomposeTimeSeries(series, period);
+  const residuals = decomp.residual;
+  
+  const mean = residuals.reduce((a, b) => a + b, 0) / residuals.length;
+  const variance = residuals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / residuals.length;
+  const stdDev = Math.sqrt(variance);
+  
+  const anomalies: AnomalyResult[] = [];
+  
+  for (let i = 0; i < series.length; i++) {
+    const p = series[i]!;
+    const expected = decomp.trend[i]! + decomp.seasonal[i]!;
+    const zScore = stdDev === 0 ? 0 : Math.abs(residuals[i]! - mean) / stdDev;
+    
+    if (zScore > sensitivity) {
+      anomalies.push({
+        pointIndex: i,
+        timestamp: p.timestamp,
+        value: p.value,
+        expectedValue: expected,
+        deviationScore: zScore,
+        isAnomaly: true
+      });
+    }
+  }
+  
+  return anomalies;
+}
+
+// --- Predictive LTV (Lifetime Value) Estimation ---
+
+export interface LTVSimulationParams {
+  readonly churnRatePerDay: number;
+  readonly discountRatePerDay: number;
+  readonly avgValuePerEvent: number;
+  readonly eventFrequencyPerDay: number;
+  readonly simulationDays: number;
+}
+
+export function estimateLeadLTV(lead: Lead, state: EngineState, params: LTVSimulationParams): number {
+  const events = state.eventIdsByLead[lead.id]?.map(id => state.events[id]!) ?? [];
+  if (events.length === 0) return 0;
+  
+  // Find current actual run rate
+  const sorted = [...events].sort((a, b) => a.occurredAt - b.occurredAt);
+  const first = sorted[0]!;
+  const last = sorted[sorted.length - 1]!;
+  
+  const daysActive = Math.max(1, (last.occurredAt - first.occurredAt) / (1000 * 60 * 60 * 24));
+  const historicalFreq = events.length / daysActive;
+  
+  // Use blended frequency
+  const effectiveFreq = (historicalFreq + params.eventFrequencyPerDay) / 2;
+  
+  let ltv = 0;
+  let survivalProb = 1.0;
+  
+  for (let day = 1; day <= params.simulationDays; day++) {
+    survivalProb *= (1 - params.churnRatePerDay);
+    if (survivalProb < 0.01) break;
+    
+    const dailyValue = effectiveFreq * params.avgValuePerEvent;
+    const discountedValue = dailyValue / Math.pow(1 + params.discountRatePerDay, day);
+    
+    ltv += discountedValue * survivalProb;
+  }
+  
+  return ltv;
+}
+
+// --- A/B Testing Simulator ---
+
+export interface ABTestConfig {
+  readonly controlPolicyId: string;
+  readonly variantPolicyId: string;
+  readonly targetMetric: "conversion_rate" | "average_score" | "event_velocity";
+  readonly confidenceLevel: number;
+}
+
+export interface ABTestResult {
+  readonly controlSize: number;
+  readonly variantSize: number;
+  readonly controlMetric: number;
+  readonly variantMetric: number;
+  readonly lift: number;
+  readonly isStatisticallySignificant: boolean;
+  readonly pValueEstimate: number;
+}
+
+export function simulateABTest(
+  state: EngineState,
+  controlLeads: readonly string[],
+  variantLeads: readonly string[],
+  config: ABTestConfig
+): ABTestResult {
+  let controlMet = 0;
+  let variantMet = 0;
+  
+  if (config.targetMetric === "conversion_rate") {
+    controlMet = controlLeads.filter(id => state.leads[id]?.lifecycle === "converted").length / Math.max(1, controlLeads.length);
+    variantMet = variantLeads.filter(id => state.leads[id]?.lifecycle === "converted").length / Math.max(1, variantLeads.length);
+  } else if (config.targetMetric === "average_score") {
+    controlMet = controlLeads.reduce((s, id) => s + (state.scores[id] ?? 0), 0) / Math.max(1, controlLeads.length);
+    variantMet = variantLeads.reduce((s, id) => s + (state.scores[id] ?? 0), 0) / Math.max(1, variantLeads.length);
+  } else {
+    // event_velocity
+    controlMet = controlLeads.reduce((s, id) => s + (state.eventIdsByLead[id]?.length ?? 0), 0) / Math.max(1, controlLeads.length);
+    variantMet = variantLeads.reduce((s, id) => s + (state.eventIdsByLead[id]?.length ?? 0), 0) / Math.max(1, variantLeads.length);
+  }
+  
+  const lift = controlMet === 0 ? 0 : (variantMet - controlMet) / controlMet;
+  
+  // Simplified Z-test approximation
+  const p1 = controlMet;
+  const p2 = variantMet;
+  const n1 = controlLeads.length;
+  const n2 = variantLeads.length;
+  
+  let zScore = 0;
+  if (config.targetMetric === "conversion_rate") {
+    const pPool = (p1 * n1 + p2 * n2) / (n1 + n2);
+    const se = Math.sqrt(pPool * (1 - pPool) * (1/n1 + 1/n2));
+    zScore = se === 0 ? 0 : (p2 - p1) / se;
+  } else {
+    // For continuous metrics, we'd need variance. Assume standard dev = mean * 0.5 for mock
+    const v1 = Math.pow(p1 * 0.5, 2);
+    const v2 = Math.pow(p2 * 0.5, 2);
+    const se = Math.sqrt(v1/n1 + v2/n2);
+    zScore = se === 0 ? 0 : (p2 - p1) / se;
+  }
+  
+  // 1.96 roughly equals 95% confidence
+  const criticalValue = config.confidenceLevel >= 0.99 ? 2.576 : (config.confidenceLevel >= 0.95 ? 1.96 : 1.645);
+  const isSig = Math.abs(zScore) >= criticalValue;
+  
+  // Very rough p-value approximation for the two-tailed normal distribution
+  const pVal = Math.exp(-0.717 * zScore - 0.416 * zScore * zScore); 
+  
+  return {
+    controlSize: n1,
+    variantSize: n2,
+    controlMetric: p1,
+    variantMetric: p2,
+    lift,
+    isStatisticallySignificant: isSig,
+    pValueEstimate: Math.min(1.0, Math.max(0, pVal))
+  };
+}
+
+// --- Multi-Armed Bandit Allocation ---
+
+export interface BanditArm {
+  readonly id: string;
+  readonly successCount: number;
+  readonly totalTrials: number;
+}
+
+export function epsilonGreedyAllocation(arms: readonly BanditArm[], epsilon: number): string {
+  // We can't use Math.random() for deterministic constraints.
+  // Instead, we will simulate a pseudo-random choice using a deterministic hash of the arm states.
+  let hash = 0;
+  for (const arm of arms) {
+    hash = ((hash << 5) - hash) + arm.successCount + arm.totalTrials;
+  }
+  const pseudoRand = Math.abs(hash % 1000) / 1000;
+  
+  if (pseudoRand < epsilon) {
+    // Exploration: pick a 'random' arm based on another hash
+    const idx = Math.abs((hash * 31) % arms.length);
+    return arms[idx]!.id;
+  } else {
+    // Exploitation: pick best arm
+    let bestArm = arms[0]!;
+    let bestRate = bestArm.totalTrials === 0 ? 0 : bestArm.successCount / bestArm.totalTrials;
+    
+    for (let i = 1; i < arms.length; i++) {
+      const arm = arms[i]!;
+      const rate = arm.totalTrials === 0 ? 0 : arm.successCount / arm.totalTrials;
+      if (rate > bestRate) {
+        bestRate = rate;
+        bestArm = arm;
+      }
+    }
+    return bestArm.id;
+  }
+}
+
+// --- Marketing Mix Modeling (MMM) Simulation ---
+
+export interface MarketingChannel {
+  readonly name: string;
+  readonly spend: number;
+  readonly attributedConversions: number;
+  readonly saturationCurve: "linear" | "logarithmic" | "s-curve";
+}
+
+export interface MMMSimulation {
+  readonly totalSpend: number;
+  readonly totalConversions: number;
+  readonly cpa: number;
+  readonly channelROI: Readonly<Record<string, number>>;
+  readonly suggestedReallocation: Readonly<Record<string, number>>; // delta spend
+}
+
+export function simulateMMM(channels: readonly MarketingChannel[]): MMMSimulation {
+  let totalSpend = 0;
+  let totalConv = 0;
+  const channelROI: Record<string, number> = {};
+  
+  for (const c of channels) {
+    totalSpend += c.spend;
+    totalConv += c.attributedConversions;
+    channelROI[c.name] = c.spend === 0 ? 0 : c.attributedConversions / c.spend;
+  }
+  
+  const cpa = totalConv === 0 ? 0 : totalSpend / totalConv;
+  const avgROI = totalConv / Math.max(1, totalSpend);
+  
+  const suggested: Record<string, number> = {};
+  for (const c of channels) {
+    const roi = channelROI[c.name] ?? 0;
+    // Suggest shifting 10% of budget toward high-ROI channels
+    if (roi > avgROI * 1.2) {
+      suggested[c.name] = c.spend * 0.1;
+    } else if (roi < avgROI * 0.8) {
+      suggested[c.name] = -c.spend * 0.1;
+    } else {
+      suggested[c.name] = 0;
+    }
+  }
+  
+  return {
+    totalSpend,
+    totalConversions: totalConv,
+    cpa,
+    channelROI,
+    suggestedReallocation: suggested
+  };
+}
