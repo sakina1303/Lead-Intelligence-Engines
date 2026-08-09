@@ -116,7 +116,7 @@ export function computeRankPercentiles(state: EngineState): readonly RankPercent
     results.push({
       leadId: lead.id,
       globalPercentile,
-      segmentPercentile,
+      ...(segmentPercentile !== undefined ? { segmentPercentile } : {}),
       lifecyclePercentile
     });
   }
