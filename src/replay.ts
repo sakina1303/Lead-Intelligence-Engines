@@ -95,9 +95,6 @@ export function runShadowPolicyExecution(
   if (shadowConfig?.floor !== undefined) shadowScore = Math.max(shadowScore, shadowConfig.floor);
   
   // Re-evaluate qualification based on shadow rules and score
-  const events = getLeadEvents(shadowState, leadId);
-  const lead = shadowState.leads[leadId]!;
-  
   let shadowQualState: string = "unqualified";
   const sortedQualPolicies = [...shadowQualificationPolicies].sort((a, b) => (b.minimumScore ?? 0) - (a.minimumScore ?? 0));
   
@@ -134,33 +131,21 @@ export interface TimeTravelContext {
 }
 
 export function getStateAtTimestamp(state: EngineState, timestamp: number): TimeTravelContext {
-  // We rebuild the state up to the timestamp. For efficiency in this domain, 
-  // we filter out events that happened after the timestamp and replay the rest.
-  // In a real DB we'd use event sourcing inherently.
-  
-  let timeTravelState: EngineState = {
-    leads: {},
-    events: {},
-    scores: {},
-    eventIdsByLead: {},
-    scoreHistory: {},
-    scoreProjections: {},
-    qualifications: {},
-    segments: {},
-    eventGroups: {},
-    eventPatterns: {},
-    cohortMemberships: {}
-  };
+  const timeTravelLeads: Record<string, import("./contracts.js").Lead> = {};
+  const timeTravelEvents: Record<string, import("./contracts.js").DomainEvent> = {};
+  const timeTravelScores: Record<string, number> = {};
+  const timeTravelEventIdsByLead: Record<string, string[]> = {};
+  const timeTravelScoreHistory: Record<string, import("./contracts.js").ScoreExplanation[]> = {};
   
   let eventsDiscarded = 0;
   
   // 1. Rebuild Leads
   for (const [id, lead] of Object.entries(state.leads)) {
     if (lead.createdAt <= timestamp) {
-      timeTravelState.leads[id] = lead;
-      timeTravelState.scores[id] = 0;
-      timeTravelState.eventIdsByLead[id] = [];
-      timeTravelState.scoreHistory[id] = [];
+      timeTravelLeads[id] = lead;
+      timeTravelScores[id] = 0;
+      timeTravelEventIdsByLead[id] = [];
+      timeTravelScoreHistory[id] = [];
     }
   }
   
@@ -168,22 +153,32 @@ export function getStateAtTimestamp(state: EngineState, timestamp: number): Time
   const sortedEvents = Object.values(state.events).sort((a, b) => a.occurredAt - b.occurredAt);
   for (const event of sortedEvents) {
     if (event.occurredAt <= timestamp) {
-      if (timeTravelState.leads[event.leadId]) {
-         timeTravelState.events[event.id] = event;
-         timeTravelState.eventIdsByLead[event.leadId]!.push(event.id);
+      if (timeTravelLeads[event.leadId]) {
+         timeTravelEvents[event.id] = event;
+         timeTravelEventIdsByLead[event.leadId]!.push(event.id);
       }
     } else {
       eventsDiscarded++;
     }
   }
   
-  // Note: We don't replay the rules here unless explicitly asked via a replay function, 
-  // because we are just querying the base state. The caller can run replayLeadScoring on this state.
+  const timeTravelState: EngineState = {
+    config: state.config,
+    leads: timeTravelLeads,
+    events: timeTravelEvents,
+    scores: timeTravelScores,
+    eventIdsByLead: timeTravelEventIdsByLead,
+    scoreHistory: timeTravelScoreHistory,
+    scoreProjections: {},
+    qualifications: {},
+    segments: {},
+    profiles: {},
+  };
   
   return {
     stateAtTime: timeTravelState,
     eventsDiscarded,
-    restoredScore: 0 // Would be populated if we replayed
+    restoredScore: 0
   };
 }
 
