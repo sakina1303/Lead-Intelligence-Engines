@@ -183,14 +183,387 @@ export function getStateAtTimestamp(state: EngineState, timestamp: number): Time
   };
 }
 
-export function replayLeadToTimestamp(state: EngineState, leadId: string, timestamp: number, rules: readonly ScoringRule[]): Outcome<number> {
-  const timeTravelCtx = getStateAtTimestamp(state, timestamp);
-  const timeTravelState = timeTravelCtx.stateAtTime;
-  
-  if (!timeTravelState.leads[leadId]) return failure(`lead '${leadId}' did not exist at timestamp ${timestamp}`);
-  
   const replayResult = replayLeadScoring(timeTravelState, leadId, rules);
   if (!replayResult.ok) return replayResult;
   
   return success(replayResult.value.state.scores[leadId] ?? 0);
+}
+
+// --- Deterministic Policy Backtesting ---
+
+export interface BacktestConfig {
+  readonly baselineRules: readonly ScoringRule[];
+  readonly experimentalRules: readonly ScoringRule[];
+  readonly targetLeadIds?: readonly string[];
+  readonly startTime?: number;
+  readonly endTime?: number;
+}
+
+export interface LeadBacktestResult {
+  readonly leadId: string;
+  readonly baselineScore: number;
+  readonly experimentalScore: number;
+  readonly scoreDelta: number;
+  readonly baselineQualified: boolean;
+  readonly experimentalQualified: boolean;
+  readonly newlyQualified: boolean;
+  readonly disqualified: boolean;
+}
+
+export interface BacktestSummary {
+  readonly totalLeadsEvaluated: number;
+  readonly averageBaselineScore: number;
+  readonly averageExperimentalScore: number;
+  readonly meanScoreDelta: number;
+  readonly totalNewlyQualified: number;
+  readonly totalDisqualified: number;
+  readonly results: readonly LeadBacktestResult[];
+}
+
+export function runPolicyBacktest(
+  state: EngineState,
+  config: BacktestConfig,
+  qualificationPolicies: readonly import("./contracts.js").QualificationPolicy[]
+): Outcome<BacktestSummary> {
+  const leadIds = config.targetLeadIds ?? Object.keys(state.leads);
+  const results: LeadBacktestResult[] = [];
+  
+  let totalBaseline = 0;
+  let totalExperimental = 0;
+  let newlyQualifiedCount = 0;
+  let disqualifiedCount = 0;
+  
+  const sortedQualPolicies = [...qualificationPolicies].sort((a, b) => (b.minimumScore ?? 0) - (a.minimumScore ?? 0));
+  
+  for (const leadId of leadIds) {
+    if (!state.leads[leadId]) continue;
+    
+    // Evaluate Baseline
+    const baselineRes = replayLeadScoring(state, leadId, config.baselineRules);
+    if (!baselineRes.ok) continue;
+    const baselineScore = baselineRes.value.state.scores[leadId] ?? 0;
+    
+    // Evaluate Experimental
+    const experimentalRes = replayLeadScoring(state, leadId, config.experimentalRules);
+    if (!experimentalRes.ok) continue;
+    const experimentalScore = experimentalRes.value.state.scores[leadId] ?? 0;
+    
+    let baseQual = false;
+    let expQual = false;
+    
+    for (const policy of sortedQualPolicies) {
+      if (!baseQual && baselineScore >= (policy.minimumScore ?? 0) && policy.qualification !== "unqualified") {
+        baseQual = true;
+      }
+      if (!expQual && experimentalScore >= (policy.minimumScore ?? 0) && policy.qualification !== "unqualified") {
+        expQual = true;
+      }
+    }
+    
+    const newlyQualified = !baseQual && expQual;
+    const disqualified = baseQual && !expQual;
+    
+    if (newlyQualified) newlyQualifiedCount++;
+    if (disqualified) disqualifiedCount++;
+    
+    totalBaseline += baselineScore;
+    totalExperimental += experimentalScore;
+    
+    results.push({
+      leadId,
+      baselineScore,
+      experimentalScore,
+      scoreDelta: experimentalScore - baselineScore,
+      baselineQualified: baseQual,
+      experimentalQualified: expQual,
+      newlyQualified,
+      disqualified
+    });
+  }
+  
+  const totalLeadsEvaluated = results.length;
+  if (totalLeadsEvaluated === 0) return failure("No leads evaluated in backtest");
+  
+  return success({
+    totalLeadsEvaluated,
+    averageBaselineScore: totalBaseline / totalLeadsEvaluated,
+    averageExperimentalScore: totalExperimental / totalLeadsEvaluated,
+    meanScoreDelta: (totalExperimental - totalBaseline) / totalLeadsEvaluated,
+    totalNewlyQualified: newlyQualifiedCount,
+    totalDisqualified: disqualifiedCount,
+    results
+  });
+}
+
+// --- What-If Deterministic Modeling ---
+
+export interface WhatIfScenario {
+  readonly id: string;
+  readonly name: string;
+  readonly eventsToInject: readonly import("./contracts.js").CreateEventInput[];
+  readonly eventsToDrop: readonly string[]; // eventIds
+  readonly ruleOverrides: readonly ScoringRule[]; // Replaces existing rules with same ID
+}
+
+export interface WhatIfResult {
+  readonly scenarioId: string;
+  readonly leadId: string;
+  readonly projectedScore: number;
+  readonly projectedQualification: string;
+  readonly scoreDeltaFromCurrent: number;
+}
+
+export function evaluateWhatIfScenario(
+  state: EngineState,
+  leadId: string,
+  scenario: WhatIfScenario,
+  currentRules: readonly ScoringRule[],
+  qualificationPolicies: readonly import("./contracts.js").QualificationPolicy[]
+): Outcome<WhatIfResult> {
+  if (!state.leads[leadId]) return failure(`lead '${leadId}' does not exist`);
+  
+  const currentScore = state.scores[leadId] ?? 0;
+  
+  // 1. Build modified rule set
+  const overrideMap = new Map<string, ScoringRule>();
+  for (const r of scenario.ruleOverrides) overrideMap.set(r.id, r);
+  
+  const modifiedRules = currentRules.map(r => overrideMap.get(r.id) ?? r);
+  for (const r of scenario.ruleOverrides) {
+    if (!currentRules.find(cr => cr.id === r.id)) {
+      modifiedRules.push(r);
+    }
+  }
+  
+  // 2. Build modified event stream
+  const currentEvents = getLeadEvents(state, leadId);
+  const dropSet = new Set(scenario.eventsToDrop);
+  
+  const keptEvents = currentEvents.filter(e => !dropSet.has(e.id));
+  
+  // Create dummy event objects for injection
+  const injectedEvents = scenario.eventsToInject.map((input, idx) => ({
+    id: input.id ?? `injected_${scenario.id}_${idx}`,
+    leadId,
+    type: input.type,
+    category: input.category ?? "system",
+    attributes: input.attributes ?? {},
+    occurredAt: input.occurredAt
+  } as import("./contracts.js").DomainEvent));
+  
+  const allEvents = [...keptEvents, ...injectedEvents].sort((a, b) => a.occurredAt - b.occurredAt);
+  
+  // 3. Replay from scratch
+  let mockState: EngineState = {
+    ...state,
+    scores: { ...state.scores, [leadId]: 0 },
+    scoreHistory: { ...state.scoreHistory, [leadId]: [] },
+    scoreProjections: { ...state.scoreProjections, [leadId]: { leadId, total: 0, dimensions: {}, updatedAt: 0 } },
+    events: {} // Not fully populated, just enough for scoreEvent if needed
+  };
+  
+  for (const event of allEvents) {
+    mockState.events[event.id] = event; // Temporarily inject
+    const res = scoreEvent(mockState, event, modifiedRules);
+    mockState = res.state;
+  }
+  
+  const projectedScore = mockState.scores[leadId] ?? 0;
+  
+  // 4. Qualification
+  let projectedQualification = "unqualified";
+  const sortedQualPolicies = [...qualificationPolicies].sort((a, b) => (b.minimumScore ?? 0) - (a.minimumScore ?? 0));
+  
+  for (const policy of sortedQualPolicies) {
+    if (projectedScore >= (policy.minimumScore ?? 0)) {
+       projectedQualification = policy.qualification;
+       break;
+    }
+  }
+  
+  return success({
+    scenarioId: scenario.id,
+    leadId,
+    projectedScore,
+    projectedQualification,
+    scoreDeltaFromCurrent: projectedScore - currentScore
+  });
+}
+
+// --- Causality Trees for Event Scoring ---
+
+export interface CausalityNode {
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly ruleId: string;
+  readonly scoreImpact: number;
+  readonly dependencies: readonly CausalityNode[];
+}
+
+export function buildScoringCausalityTree(
+  state: EngineState,
+  leadId: string,
+  targetEventId: string
+): Outcome<CausalityNode> {
+  const history = state.scoreHistory[leadId] ?? [];
+  const targetExp = history.find(h => h.eventId === targetEventId);
+  
+  if (!targetExp) return failure(`Event '${targetEventId}' not found in score history for lead '${leadId}'`);
+  
+  const event = state.events[targetEventId];
+  if (!event) return failure(`Event '${targetEventId}' not found in event ledger`);
+  
+  // In a purely functional append-only system without explicit event dependencies,
+  // we infer causality based on time-window proximity and shared attributes.
+  
+  const priorEvents = history.filter(h => h.occurredAt < targetExp.occurredAt);
+  
+  // Find potential causes (events within last 24h that share attributes)
+  const windowMs = 24 * 60 * 60 * 1000;
+  const potentialCauses = priorEvents.filter(h => targetExp.occurredAt - h.occurredAt <= windowMs);
+  
+  const dependencies: CausalityNode[] = [];
+  
+  // Deterministic dependency extraction
+  for (const cause of potentialCauses.slice(-3)) { // Max 3 dependencies to prevent explosion
+    const causeEvent = state.events[cause.eventId];
+    if (causeEvent) {
+      // Very naive dependency link: just temporal precedence
+      dependencies.push({
+        eventId: cause.eventId,
+        eventType: causeEvent.type,
+        ruleId: cause.ruleIds[0] ?? "unknown",
+        scoreImpact: cause.appliedDelta,
+        dependencies: [] // We could recurse here, but keep it shallow for this module
+      });
+    }
+  }
+  
+  return success({
+    eventId: targetEventId,
+    eventType: event.type,
+    ruleId: targetExp.ruleIds[0] ?? "unknown",
+    scoreImpact: targetExp.appliedDelta,
+    dependencies
+  });
+}
+
+// --- Variance Analysis ---
+
+export interface VarianceReport {
+  readonly leadId: string;
+  readonly scoreVariance: number;
+  readonly highImpactEventsCount: number;
+  readonly volatilityIndex: number;
+  readonly expectedScoreGivenHistory: number;
+}
+
+export function calculateScoreVariance(state: EngineState, leadId: string): Outcome<VarianceReport> {
+  const history = state.scoreHistory[leadId] ?? [];
+  if (history.length === 0) return failure("No score history available for variance analysis");
+  
+  const scores = history.map(h => h.nextScore);
+  const n = scores.length;
+  
+  const mean = scores.reduce((s, v) => s + v, 0) / n;
+  const variance = scores.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / n;
+  
+  let highImpactEventsCount = 0;
+  for (const h of history) {
+    if (Math.abs(h.appliedDelta) >= 15) {
+      highImpactEventsCount++;
+    }
+  }
+  
+  const stdDev = Math.sqrt(variance);
+  const volatilityIndex = mean === 0 ? 0 : stdDev / Math.abs(mean);
+  
+  // Simple moving average for expected next score
+  const recentScores = scores.slice(-3);
+  const expectedScoreGivenHistory = recentScores.length > 0 
+    ? recentScores.reduce((a, b) => a + b, 0) / recentScores.length 
+    : mean;
+  
+  return success({
+    leadId,
+    scoreVariance: variance,
+    highImpactEventsCount,
+    volatilityIndex,
+    expectedScoreGivenHistory: Math.round(expectedScoreGivenHistory)
+  });
+}
+
+// --- Rule Permutation Sensitivity ---
+
+export interface RuleSensitivity {
+  readonly ruleId: string;
+  readonly removalImpactOnTotalScore: number;
+  readonly removalImpactOnQualification: "none" | "disqualified" | "downgraded";
+}
+
+export function analyzeRuleSensitivity(
+  state: EngineState, 
+  leadId: string, 
+  currentRules: readonly ScoringRule[],
+  qualificationPolicies: readonly import("./contracts.js").QualificationPolicy[]
+): Outcome<readonly RuleSensitivity[]> {
+  const baseScore = state.scores[leadId] ?? 0;
+  const sensitivities: RuleSensitivity[] = [];
+  
+  const sortedQualPolicies = [...qualificationPolicies].sort((a, b) => (b.minimumScore ?? 0) - (a.minimumScore ?? 0));
+  let baseQual = "unqualified";
+  for (const p of sortedQualPolicies) {
+    if (baseScore >= (p.minimumScore ?? 0)) {
+      baseQual = p.qualification;
+      break;
+    }
+  }
+  
+  // O(N) where N is number of rules that applied to this lead.
+  // Find which rules actually applied first
+  const history = state.scoreHistory[leadId] ?? [];
+  const appliedRuleIds = new Set<string>();
+  for (const h of history) {
+    for (const rid of h.ruleIds) appliedRuleIds.add(rid);
+  }
+  
+  for (const ruleId of appliedRuleIds) {
+    const rulesWithoutThis = currentRules.filter(r => r.id !== ruleId);
+    
+    // We can optimize this by just subtracting the known impacts of this rule from the history
+    // instead of a full replay, because our engine is additive and commutative (mostly).
+    let simulatedScore = baseScore;
+    for (const h of history) {
+      if (h.ruleIds.includes(ruleId)) {
+        // If it was the only rule, subtract its full impact
+        if (h.ruleIds.length === 1) simulatedScore -= h.appliedDelta;
+        // If it was one of many, subtract proportional impact
+        else simulatedScore -= (h.appliedDelta / h.ruleIds.length);
+      }
+    }
+    
+    let simQual = "unqualified";
+    for (const p of sortedQualPolicies) {
+      if (simulatedScore >= (p.minimumScore ?? 0)) {
+        simQual = p.qualification;
+        break;
+      }
+    }
+    
+    let qualImpact: "none" | "disqualified" | "downgraded" = "none";
+    if (baseQual !== "unqualified" && simQual === "unqualified") {
+      qualImpact = "disqualified";
+    } else if (baseQual !== simQual && baseQual !== "unqualified") {
+      // Naive downgrade check
+      qualImpact = "downgraded";
+    }
+    
+    sensitivities.push({
+      ruleId,
+      removalImpactOnTotalScore: simulatedScore - baseScore,
+      removalImpactOnQualification: qualImpact
+    });
+  }
+  
+  return success(sensitivities.sort((a, b) => Math.abs(b.removalImpactOnTotalScore) - Math.abs(a.removalImpactOnTotalScore)));
 }
