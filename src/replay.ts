@@ -183,6 +183,12 @@ export function getStateAtTimestamp(state: EngineState, timestamp: number): Time
   };
 }
 
+export function replayLeadToTimestamp(state: EngineState, leadId: string, timestamp: number, rules: readonly ScoringRule[]): Outcome<number> {
+  const timeTravelCtx = getStateAtTimestamp(state, timestamp);
+  const timeTravelState = timeTravelCtx.stateAtTime;
+  
+  if (!timeTravelState.leads[leadId]) return failure(`lead '${leadId}' did not exist at timestamp ${timestamp}`);
+  
   const replayResult = replayLeadScoring(timeTravelState, leadId, rules);
   if (!replayResult.ok) return replayResult;
   
