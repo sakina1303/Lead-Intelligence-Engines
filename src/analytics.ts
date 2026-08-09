@@ -32,6 +32,88 @@ export function summarize(state: EngineState): AnalyticsSummary {
   return { leadCount, eventCount: Object.keys(state.events).length, totalScore, averageScore: leadCount === 0 ? 0 : totalScore / leadCount, scoresByLifecycle, leadsByQualification, leadsBySegment, eventsByCategory, eventsByType };
 }
 
+export interface EventCohortRetention {
+  readonly cohortStart: number;
+  readonly cohortEnd: number;
+  readonly cohortSize: number;
+  readonly retainedLeads: number;
+  readonly retentionRate: number;
+  readonly convertedLeads: number;
+  readonly conversionRate: number;
+  readonly averageEventsBeforeWindow: number;
+  readonly averageEventsInWindow: number;
+}
+
+/**
+ * Measures whether leads acquired in a supplied cohort window remain active in
+ * a later observation window. Activity is derived exclusively from the event
+ * ledger, so a lead cannot be counted as retained merely because it has a
+ * current score or segment.
+ */
+export function analyzeEventCohortRetention(state: EngineState, cohortStart: number, cohortEnd: number, observationStart: number, observationEnd: number): EventCohortRetention {
+  if (cohortEnd < cohortStart || observationEnd < observationStart) throw new Error("window end must not precede window start");
+  const members = Object.values(state.leads).filter((lead) => lead.createdAt >= cohortStart && lead.createdAt <= cohortEnd);
+  let retainedLeads = 0; let convertedLeads = 0; let beforeEvents = 0; let windowEvents = 0;
+  for (const lead of members) {
+    const events = (state.eventIdsByLead[lead.id] ?? []).map((id) => state.events[id]).filter((event): event is DomainEvent => event !== undefined);
+    const before = events.filter((event) => event.occurredAt < observationStart).length;
+    const active = events.filter((event) => event.occurredAt >= observationStart && event.occurredAt <= observationEnd).length;
+    beforeEvents += before; windowEvents += active;
+    if (active > 0) retainedLeads += 1;
+    if (lead.lifecycle === "converted") convertedLeads += 1;
+  }
+  const cohortSize = members.length;
+  return { cohortStart, cohortEnd, cohortSize, retainedLeads, retentionRate: cohortSize === 0 ? 0 : retainedLeads / cohortSize, convertedLeads, conversionRate: cohortSize === 0 ? 0 : convertedLeads / cohortSize, averageEventsBeforeWindow: cohortSize === 0 ? 0 : beforeEvents / cohortSize, averageEventsInWindow: cohortSize === 0 ? 0 : windowEvents / cohortSize };
+}
+
+export interface ScoreEventCorrelation {
+  readonly eventSelector: { readonly eventType?: string; readonly category?: EventCategory };
+  readonly coefficient: number;
+  readonly sampleSize: number;
+  readonly averageSelectedEvents: number;
+  readonly averageScore: number;
+}
+
+/** Pearson correlation between a lead's final score and its observed event count. */
+export function correlateScoreWithEvents(state: EngineState, selector: { readonly eventType?: string; readonly category?: EventCategory } = {}): ScoreEventCorrelation {
+  const observations = Object.values(state.leads).map((lead) => {
+    const count = (state.eventIdsByLead[lead.id] ?? []).reduce((total, id) => {
+      const event = state.events[id];
+      return total + (event && (selector.eventType === undefined || event.type === selector.eventType) && (selector.category === undefined || event.category === selector.category) ? 1 : 0);
+    }, 0);
+    return { count, score: state.scores[lead.id] ?? 0 };
+  });
+  const sampleSize = observations.length;
+  if (sampleSize === 0) return { eventSelector: selector, coefficient: 0, sampleSize, averageSelectedEvents: 0, averageScore: 0 };
+  const averageSelectedEvents = observations.reduce((sum, item) => sum + item.count, 0) / sampleSize;
+  const averageScore = observations.reduce((sum, item) => sum + item.score, 0) / sampleSize;
+  let covariance = 0; let eventVariance = 0; let scoreVariance = 0;
+  for (const item of observations) {
+    const eventDelta = item.count - averageSelectedEvents; const scoreDelta = item.score - averageScore;
+    covariance += eventDelta * scoreDelta; eventVariance += eventDelta * eventDelta; scoreVariance += scoreDelta * scoreDelta;
+  }
+  const coefficient = eventVariance === 0 || scoreVariance === 0 ? 0 : covariance / Math.sqrt(eventVariance * scoreVariance);
+  return { eventSelector: selector, coefficient, sampleSize, averageSelectedEvents, averageScore };
+}
+
+export interface EventWindowComparison {
+  readonly earlierCount: number;
+  readonly laterCount: number;
+  readonly absoluteChange: number;
+  readonly relativeChange: number;
+  readonly leadIdsWithNewActivity: readonly string[];
+}
+
+/** Compares two caller-defined event windows without relying on wall-clock time. */
+export function compareEventWindows(state: EngineState, earlier: { readonly start: number; readonly end: number }, later: { readonly start: number; readonly end: number }): EventWindowComparison {
+  if (earlier.end < earlier.start || later.end < later.start) throw new Error("window end must not precede window start");
+  const count = (window: { readonly start: number; readonly end: number }) => Object.values(state.events).filter((event) => event.occurredAt >= window.start && event.occurredAt <= window.end).length;
+  const earlierCount = count(earlier); const laterCount = count(later);
+  const earlierLeads = new Set(Object.values(state.events).filter((event) => event.occurredAt >= earlier.start && event.occurredAt <= earlier.end).map((event) => event.leadId));
+  const leadIdsWithNewActivity = [...new Set(Object.values(state.events).filter((event) => event.occurredAt >= later.start && event.occurredAt <= later.end && !earlierLeads.has(event.leadId)).map((event) => event.leadId))].sort();
+  return { earlierCount, laterCount, absoluteChange: laterCount - earlierCount, relativeChange: earlierCount === 0 ? (laterCount === 0 ? 0 : 1) : (laterCount - earlierCount) / earlierCount, leadIdsWithNewActivity };
+}
+
 import type { CohortDefinition, CohortMembership, CohortMetrics, CohortComparison, TrendDataPoint, TrendAnalysis, FunnelDefinition, FunnelResult, FunnelStageResult, FunnelAggregation, FunnelStageAggregation } from "./contracts.js";
 
 // --- Cohort Analysis ---
