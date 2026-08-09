@@ -258,10 +258,10 @@ export function runPolicyBacktest(
     let expQual = false;
     
     for (const policy of sortedQualPolicies) {
-      if (!baseQual && baselineScore >= (policy.minimumScore ?? 0) && policy.qualification !== "unqualified") {
+      if (!baseQual && baselineScore >= (policy.minimumScore ?? 0)) {
         baseQual = true;
       }
-      if (!expQual && experimentalScore >= (policy.minimumScore ?? 0) && policy.qualification !== "unqualified") {
+      if (!expQual && experimentalScore >= (policy.minimumScore ?? 0)) {
         expQual = true;
       }
     }
@@ -369,7 +369,7 @@ export function evaluateWhatIfScenario(
   };
   
   for (const event of allEvents) {
-    mockState.events[event.id] = event; // Temporarily inject
+    mockState = { ...mockState, events: { ...mockState.events, [event.id]: event } };
     const res = scoreEvent(mockState, event, modifiedRules);
     mockState = res.state;
   }
@@ -534,7 +534,6 @@ export function analyzeRuleSensitivity(
   }
   
   for (const ruleId of appliedRuleIds) {
-    const rulesWithoutThis = currentRules.filter(r => r.id !== ruleId);
     
     // We can optimize this by just subtracting the known impacts of this rule from the history
     // instead of a full replay, because our engine is additive and commutative (mostly).
