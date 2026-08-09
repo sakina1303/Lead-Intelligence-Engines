@@ -1,6 +1,6 @@
 export * from "./contracts.js";
 export { validateEngineConfig, validateRuleSet } from "./config.js";
-export { createEngine, createLeadInEngine, processEvent, refreshLeadIntelligence } from "./engine.js";
+export { auditEngineState, createEngine, createLeadInEngine, processEvent, processEventsInOrder, reconcileEngineState, refreshLeadIntelligence, resetLeadIntelligence } from "./engine.js";
 export { processBatch } from "./batch.js";
 export { addLead, allowedLifecycleTransitions, createLead, transitionLifecycle, updateLeadAttributes } from "./leads.js";
 export { addLeadTag, compareLeadChanges, createLeadProfile, getLeadHistory, recordLeadChange, removeLeadTag, setLeadOwnership, updateConsent } from "./lead-history.js";

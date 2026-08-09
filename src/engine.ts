@@ -1,4 +1,4 @@
-import type { CreateEventInput, CreateLeadInput, EngineConfig, EngineState, EventProcessResult, ScoringRule, Timestamp } from "./contracts.js";
+import type { CreateEventInput, CreateLeadInput, EngineConfig, EngineState, EventProcessResult, InvariantKind, ScoringRule, StateAuditResult, StateInvariantViolation, Timestamp } from "./contracts.js";
 import { appendEvent, getLeadEvents } from "./event-ledger.js";
 import { addLead } from "./leads.js";
 import { evaluateQualification, selectQualification } from "./qualification.js";
@@ -34,6 +34,105 @@ export function refreshLeadIntelligence(state: EngineState, leadId: string, eval
   const segment = assignSegment(lead, state.scores[leadId] ?? 0, events, qualification, state.config.segmentPolicy);
   const next = { ...state, qualifications: { ...state.qualifications, [leadId]: qualification }, segments: { ...state.segments, [leadId]: segment } };
   return { state: next, outcome: "accepted", ...base, qualification, segment };
+}
+
+/**
+ * Audits the denormalised parts of EngineState.  The event ledger is the source
+ * of truth; indexes, scores, projections, qualifications, and segments are all
+ * derived views and are checked against it without changing the input state.
+ */
+export function auditEngineState(state: EngineState): StateAuditResult {
+  const violations: StateInvariantViolation[] = [];
+  const add = (kind: InvariantKind, entityId: string, entityType: StateInvariantViolation["entityType"], message: string, severity: StateInvariantViolation["severity"] = "error") => {
+    violations.push({ kind, entityId, entityType, message, severity });
+  };
+  const indexed = new Set<string>();
+
+  for (const [leadId, eventIds] of Object.entries(state.eventIdsByLead)) {
+    if (!state.leads[leadId]) add("missing-lead-events-index", leadId, "lead", "event index exists for a missing lead");
+    let previous: import("./contracts.js").DomainEvent | undefined;
+    for (const eventId of eventIds) {
+      if (indexed.has(eventId)) add("duplicate-event-id", eventId, "event", "event appears more than once in the lead index");
+      indexed.add(eventId);
+      const event = state.events[eventId];
+      if (!event) {
+        add("orphaned-event", eventId, "event", "event index references an event that is absent from the ledger");
+        continue;
+      }
+      if (event.leadId !== leadId) add("orphaned-event", eventId, "event", "event is indexed under a different lead");
+      if (previous && (event.occurredAt < previous.occurredAt || (event.occurredAt === previous.occurredAt && event.sequence < previous.sequence))) {
+        add("event-order-violation", leadId, "event", "events are not ordered by occurredAt and sequence", "warning");
+      }
+      previous = event;
+    }
+  }
+  for (const event of Object.values(state.events)) {
+    if (!state.leads[event.leadId]) add("orphaned-event", event.id, "event", "ledger event belongs to a missing lead");
+    if (!indexed.has(event.id)) add("missing-lead-events-index", event.id, "event", "ledger event is absent from the lead index");
+  }
+  for (const leadId of Object.keys(state.leads)) {
+    if (!state.eventIdsByLead[leadId]) add("missing-lead-events-index", leadId, "lead", "lead has no event index");
+    const score = state.scores[leadId];
+    if (score !== undefined && score < state.config.scorePolicy.floor) add("negative-score-below-floor", leadId, "score", "score is below the configured floor");
+    if (score !== undefined && score > state.config.scorePolicy.cap) add("score-above-cap", leadId, "score", "score is above the configured cap");
+    const projection = state.scoreProjections[leadId];
+    if (projection && projection.total !== (score ?? 0)) add("score-projection-stale", leadId, "score", "score projection total differs from current score");
+    const history = state.scoreHistory[leadId] ?? [];
+    if (history.length > 0 && history[history.length - 1]!.nextScore !== (score ?? 0)) add("score-history-mismatch", leadId, "history", "last score history entry differs from current score");
+  }
+  for (const leadId of Object.keys(state.scores)) if (!state.leads[leadId]) add("orphaned-score", leadId, "score", "score belongs to a missing lead");
+  for (const leadId of Object.keys(state.profiles)) if (!state.leads[leadId]) add("profile-orphaned", leadId, "profile", "profile belongs to a missing lead");
+  for (const leadId of Object.keys(state.leadHistory)) if (!state.leads[leadId]) add("history-orphaned", leadId, "history", "lead history belongs to a missing lead");
+
+  const summary = {} as Record<InvariantKind, number>;
+  for (const violation of violations) summary[violation.kind] = (summary[violation.kind] ?? 0) + 1;
+  return { violations, auditedLeads: Object.keys(state.leads).length, auditedEvents: Object.keys(state.events).length, isConsistent: violations.every((item) => item.severity !== "error"), summary };
+}
+
+/** Rebuilds score-dependent views from the ledger, retaining only valid events. */
+export function reconcileEngineState(state: EngineState, rules: readonly ScoringRule[], evaluatedAt: Timestamp): EngineState {
+  const events = Object.fromEntries(Object.values(state.events).filter((event) => state.leads[event.leadId]).map((event) => [event.id, event]));
+  const eventIdsByLead: Record<string, string[]> = Object.fromEntries(Object.keys(state.leads).map((leadId) => [leadId, []]));
+  for (const event of Object.values(events)) eventIdsByLead[event.leadId]!.push(event.id);
+  for (const ids of Object.values(eventIdsByLead)) ids.sort((left, right) => {
+    const a = events[left]!; const b = events[right]!;
+    return a.occurredAt - b.occurredAt || a.sequence - b.sequence || a.id.localeCompare(b.id);
+  });
+  let next: EngineState = { ...state, events, eventIdsByLead, scores: {}, scoreHistory: {}, scoreProjections: {}, qualifications: {}, segments: {} };
+  for (const leadId of Object.keys(next.leads).sort()) {
+    const replayed = replayLeadScoring(next, leadId, rules);
+    if (replayed.ok) next = replayed.value.state;
+    const refreshed = refreshLeadIntelligence(next, leadId, evaluatedAt);
+    if (refreshed.outcome === "accepted") next = refreshed.state;
+  }
+  return next;
+}
+
+/** Removes derived intelligence for selected leads, leaving the append-only lead and event records intact. */
+export function resetLeadIntelligence(state: EngineState, leadIds: readonly string[]): EngineState {
+  const selected = new Set(leadIds.filter((leadId) => state.leads[leadId]));
+  const without = <T>(source: Readonly<Record<string, T>>): Record<string, T> => Object.fromEntries(Object.entries(source).filter(([id]) => !selected.has(id)));
+  return { ...state, scores: without(state.scores), scoreHistory: without(state.scoreHistory), scoreProjections: without(state.scoreProjections), qualifications: without(state.qualifications), segments: without(state.segments) };
+}
+
+export interface BulkProcessResult {
+  readonly state: EngineState;
+  readonly accepted: readonly string[];
+  readonly duplicates: readonly string[];
+  readonly rejected: readonly { readonly eventId: string; readonly errors: readonly string[] }[];
+}
+
+/** Processes a caller-ordered batch. A rejection is isolated; accepted events remain durable in the returned state. */
+export function processEventsInOrder(state: EngineState, events: readonly CreateEventInput[], rules: readonly ScoringRule[], evaluatedAt: Timestamp): BulkProcessResult {
+  let next = state;
+  const accepted: string[] = []; const duplicates: string[] = []; const rejected: { eventId: string; errors: readonly string[] }[] = [];
+  for (const event of events) {
+    const result = processEvent(next, event, rules, evaluatedAt);
+    if (result.outcome === "accepted") { next = result.state; accepted.push(event.id); }
+    else if (result.outcome === "duplicate") { next = result.state; duplicates.push(event.id); }
+    else rejected.push({ eventId: event.id, errors: result.errors ?? ["event rejected"] });
+  }
+  return { state: next, accepted, duplicates, rejected };
 }
 
 // --- Event Correlation and Pattern Matching (CEP) ---
