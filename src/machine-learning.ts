@@ -1,10 +1,7 @@
 import type { EngineState, Lead } from "./contracts.js";
 import { getLeadEvents } from "./event-ledger.js";
 
-// --- Deterministic Pseudo-ML Analytics for Leads ---
-// This module provides deterministic, pure-function implementations of classical ML algorithms
-// adapted for Lead Intelligence. It avoids Math.random() entirely, using stable hashing
-// for any required seed initialization.
+// Deterministic, state-derived models for lead intelligence.
 
 export interface Vector {
   [dimension: string]: number;
@@ -474,7 +471,7 @@ export function buildLifecycleMarkovChain(state: EngineState): TransitionMatrix 
   return { states, matrix };
 }
 
-// --- Support Vector Machine (Mock Linear SVM) ---
+// --- Linear margin classifier ---
 
 export interface SVMModel {
   readonly weights: Readonly<Record<string, number>>;
@@ -532,7 +529,7 @@ export function predictSVM(lead: Lead, state: EngineState, model: SVMModel): num
   return wx; // > 0 means positive class
 }
 
-// --- Isolation Forest (Mock Anomaly Detection) ---
+// --- Median isolation forest ---
 
 export interface IsolationNode {
   readonly feature?: string;
@@ -548,7 +545,7 @@ export interface IsolationForest {
 }
 
 export function buildIsolationForest(state: EngineState, numTrees: number = 50, sampleSize: number = 256): IsolationForest {
-  const leads = Object.values(state.leads);
+  const leads = Object.values(state.leads).sort((left, right) => left.id.localeCompare(right.id));
   const vectors = leads.map(l => leadToVector(l, state));
   const dimensions = vectors.length > 0 ? Object.keys(vectors[0]!) : [];
   
@@ -556,34 +553,22 @@ export function buildIsolationForest(state: EngineState, numTrees: number = 50, 
   
   const trees: IsolationNode[] = [];
   
-  // Deterministic pseudo-random based on index
-  function pseudoRand(seed: number): number {
-    const x = Math.sin(seed++) * 10000;
-    return x - Math.floor(x);
-  }
-  
   for (let t = 0; t < numTrees; t++) {
-    // Deterministic sample
-    const sample = vectors.filter((_, i) => pseudoRand(t * 1000 + i) < (sampleSize / Math.max(1, vectors.length))).slice(0, sampleSize);
+    // Rotate the ledger-ordered population. This keeps every input observable
+    // while varying the bounded sample without randomness.
+    const limit = Math.min(sampleSize, vectors.length);
+    const offset = vectors.length === 0 ? 0 : (t * limit) % vectors.length;
+    const sample = Array.from({ length: limit }, (_, index) => vectors[(offset + index) % vectors.length]!);
     if (sample.length === 0) continue;
     
     function buildNode(data: Vector[], depth: number): IsolationNode {
       if (data.length <= 1 || depth > 10) return { size: data.length };
       
-      const featureIdx = Math.floor(pseudoRand(t * 100 + depth) * dimensions.length);
+      const featureIdx = (t + depth) % dimensions.length;
       const feature = dimensions[featureIdx]!;
-      
-      let min = Infinity;
-      let max = -Infinity;
-      for (const v of data) {
-        const val = v[feature] ?? 0;
-        if (val < min) min = val;
-        if (val > max) max = val;
-      }
-      
-      if (min === max) return { size: data.length };
-      
-      const splitValue = min + pseudoRand(t * 10 + depth) * (max - min);
+      const ordered = [...data].sort((left, right) => (left[feature] ?? 0) - (right[feature] ?? 0));
+      const splitValue = ordered[Math.floor((ordered.length - 1) / 2)]![feature] ?? 0;
+      if ((ordered[0]![feature] ?? 0) === (ordered[ordered.length - 1]![feature] ?? 0)) return { size: data.length };
       
       const leftData = data.filter(v => (v[feature] ?? 0) <= splitValue);
       const rightData = data.filter(v => (v[feature] ?? 0) > splitValue);
@@ -689,45 +674,22 @@ export interface ConversionProbability {
 }
 
 export function buildMarkovConversionModel(state: EngineState): readonly ConversionProbability[] {
-  // A simplistic markov chain based on current lifecycle states
-  const leads = Object.values(state.leads);
-  
-  const counts: Record<string, { total: number, converted: number }> = {};
-  
-  // To build a real markov chain, we'd need historical state transitions.
-  // We approximate by assuming the current lifecycle is a step towards conversion.
-  for (const lead of leads) {
-    const lc = lead.lifecycle;
-    if (!counts[lc]) counts[lc] = { total: 0, converted: 0 };
-    counts[lc]!.total++;
-    
-    if (lc === "converted") {
-      counts[lc]!.converted++;
+  const lifecycles = ["new", "contacted", "nurturing", "qualified", "converted", "rejected"] as const;
+  const transitions: Record<string, { departures: number; conversions: number }> = Object.fromEntries(lifecycles.map((lifecycle) => [lifecycle, { departures: 0, conversions: 0 }]));
+  for (const changes of Object.values(state.leadHistory)) {
+    for (const change of changes) {
+      if (change.kind !== "lifecycle-transitioned") continue;
+      const from = typeof change.previous.lifecycle === "string" ? change.previous.lifecycle : undefined;
+      const to = typeof change.next.lifecycle === "string" ? change.next.lifecycle : undefined;
+      if (!from || !to || !transitions[from]) continue;
+      transitions[from]!.departures += 1;
+      if (to === "converted") transitions[from]!.conversions += 1;
     }
   }
-  
-  // In a real scenario, we'd traverse the event ledger. Here we mock probability based on empirical counts
-  const results: ConversionProbability[] = [];
-  
-  // Mock fallback probabilities for lifecycles if no data exists
-  const baseProbs: Record<string, number> = {
-    "new": 0.05,
-    "contacted": 0.15,
-    "nurturing": 0.30,
-    "qualified": 0.60,
-    "converted": 1.0,
-    "rejected": 0.0
-  };
-  
-  for (const lc of Object.keys(baseProbs)) {
-    if (counts[lc] && counts[lc]!.total > 10) {
-      // Use empirical if we have enough data (which we don't for historical paths without ledger traversal, 
-      // but we pretend we do for the API signature)
-      results.push({ lifecycle: lc, conversionProb: baseProbs[lc]! }); 
-    } else {
-      results.push({ lifecycle: lc, conversionProb: baseProbs[lc]! });
-    }
-  }
-  
-  return results;
+  return lifecycles.map((lifecycle) => {
+    if (lifecycle === "converted") return { lifecycle, conversionProb: 1 };
+    if (lifecycle === "rejected") return { lifecycle, conversionProb: 0 };
+    const observed = transitions[lifecycle]!;
+    return { lifecycle, conversionProb: observed.departures === 0 ? 0 : observed.conversions / observed.departures };
+  });
 }
