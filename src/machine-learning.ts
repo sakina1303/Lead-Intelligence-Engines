@@ -1,4 +1,5 @@
-import type { DomainEvent, EngineState, Lead } from "./contracts.js";
+import type { EngineState, Lead } from "./contracts.js";
+import { getLeadEvents } from "./event-ledger.js";
 
 // --- Deterministic Pseudo-ML Analytics for Leads ---
 // This module provides deterministic, pure-function implementations of classical ML algorithms
@@ -6,7 +7,7 @@ import type { DomainEvent, EngineState, Lead } from "./contracts.js";
 // for any required seed initialization.
 
 export interface Vector {
-  readonly [dimension: string]: number;
+  [dimension: string]: number;
 }
 
 export interface ClusteringConfig {
@@ -100,9 +101,9 @@ export function kMeansClustering(state: EngineState, config: ClusteringConfig = 
       }
       
       for (let i = 0; i < config.k; i++) {
-        if (clusterCounts[i] > 0) {
+        if (clusterCounts[i]! > 0) {
           for (const d of dimensions) {
-            centroids[i]![d] = newCentroids[i]![d]! / clusterCounts[i];
+            centroids[i]![d] = (newCentroids[i]![d] ?? 0) / clusterCounts[i]!;
           }
         }
       }
@@ -454,7 +455,7 @@ export function buildLifecycleMarkovChain(state: EngineState): TransitionMatrix 
     }
     
     let total = 0;
-    for (const [toState, count] of map.entries()) {
+    for (const count of map.values()) {
       total += count;
     }
     
