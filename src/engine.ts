@@ -138,18 +138,18 @@ export function analyzeLeadFraudRisk(state: EngineState, leadId: string, config:
   }
   
   // Fake impossible travel check (assumes lat/lon metadata on events)
-  let prevEventWithLocation = events.find(e => e.metadata?.lat && e.metadata?.lon);
+  let prevEventWithLocation = events.find(e => (e as any).metadata?.lat && (e as any).metadata?.lon);
   if (prevEventWithLocation) {
     for (let i = events.indexOf(prevEventWithLocation) + 1; i < events.length; i++) {
       const e = events[i]!;
-      if (e.metadata?.lat && e.metadata?.lon) {
+      if ((e as any).metadata?.lat && (e as any).metadata?.lon) {
         const timeDiffSec = (e.occurredAt - prevEventWithLocation.occurredAt) / 1000;
         if (timeDiffSec > 0) {
           // Haversine mock distance
-          const lat1 = Number(prevEventWithLocation.metadata.lat);
-          const lon1 = Number(prevEventWithLocation.metadata.lon);
-          const lat2 = Number(e.metadata.lat);
-          const lon2 = Number(e.metadata.lon);
+          const lat1 = Number((prevEventWithLocation as any).metadata.lat);
+          const lon1 = Number((prevEventWithLocation as any).metadata.lon);
+          const lat2 = Number((e as any).metadata.lat);
+          const lon2 = Number((e as any).metadata.lon);
           
           const distMeters = Math.sqrt(Math.pow(lat2 - lat1, 2) + Math.pow(lon2 - lon1, 2)) * 111000;
           const speed = distMeters / timeDiffSec;
