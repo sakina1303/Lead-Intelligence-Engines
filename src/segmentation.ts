@@ -59,7 +59,7 @@ export function assignAdvancedSegment(
                        (candidate.maximumScore === undefined || score <= candidate.maximumScore);
     const qualMatch = candidate.qualificationStates === undefined || 
                       (qualification !== undefined && candidate.qualificationStates.includes(qualification.state));
-    const attrMatch = matchesAttributes(lead.attributes, candidate.requiredAttributes);
+    const attrMatch = !candidate.requiredAttributes || Object.entries(candidate.requiredAttributes).every(([k, v]) => lead.attributes[k] === v);
     const eventMatch = (candidate.requiredEventTypes ?? []).every((type) => events.some((event) => event.type === type));
     
     let dimMatch = true;
