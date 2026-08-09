@@ -363,3 +363,209 @@ export function compactEventStream(state: EngineState, leadId: string): Compacti
     compactedState,
   };
 }
+
+// --- Data Lineage Tracking ---
+
+export interface LineageTrace {
+  readonly leadId: string;
+  readonly creationEventId: string | null;
+  readonly lastModifiedEventId: string | null;
+  readonly totalTransformations: number;
+  readonly modificationPath: readonly string[]; // event IDs that modified state
+}
+
+export function traceLeadLineage(state: EngineState, leadId: string): Outcome<LineageTrace> {
+  const events = getLeadEvents(state, leadId);
+  if (!state.leads[leadId]) return failure(`lead '${leadId}' does not exist`);
+  
+  const creationEvent = events.find(e => e.type.toLowerCase().includes("create") || e.type.toLowerCase().includes("new"));
+  const modEvents = events.filter(e => e.type.toLowerCase().includes("update") || e.type.toLowerCase().includes("change") || e.type.toLowerCase().includes("modify"));
+  
+  return success({
+    leadId,
+    creationEventId: creationEvent ? creationEvent.id : (events.length > 0 ? events[0]!.id : null),
+    lastModifiedEventId: modEvents.length > 0 ? modEvents[modEvents.length - 1]!.id : (events.length > 0 ? events[events.length - 1]!.id : null),
+    totalTransformations: modEvents.length,
+    modificationPath: modEvents.map(e => e.id)
+  });
+}
+
+// --- Complex Event Sequences (with variables) ---
+
+export interface SequenceVariable {
+  readonly name: string;
+  readonly fromAttribute: string;
+}
+
+export interface SequenceStep {
+  readonly eventType: string;
+  readonly extractVariables?: readonly SequenceVariable[];
+  readonly requireVariablesMatch?: Readonly<Record<string, string>>; // attribute name -> variable name
+  readonly maxDelayMs?: number;
+}
+
+export interface SequenceDefinition {
+  readonly id: string;
+  readonly steps: readonly SequenceStep[];
+}
+
+export interface SequenceMatch {
+  readonly sequenceId: string;
+  readonly leadId: string;
+  readonly matchedEventIds: readonly string[];
+  readonly variables: Readonly<Record<string, string | number | boolean>>;
+  readonly completedAt: number;
+}
+
+export function matchComplexSequences(state: EngineState, leadId: string, sequences: readonly SequenceDefinition[]): readonly SequenceMatch[] {
+  const events = getLeadEvents(state, leadId);
+  if (events.length === 0) return [];
+  
+  const matches: SequenceMatch[] = [];
+  
+  for (const seq of sequences) {
+    if (seq.steps.length === 0) continue;
+    if (events.length < seq.steps.length) continue;
+    
+    for (let i = 0; i <= events.length - seq.steps.length; i++) {
+      if (events[i]!.type !== seq.steps[0]!.eventType) continue;
+      
+      let patternIdx = 0;
+      let j = i;
+      const matchedIds: string[] = [];
+      const vars: Record<string, string | number | boolean> = {};
+      let isValidMatch = true;
+      let lastMatchTime = events[i]!.occurredAt;
+      
+      while (patternIdx < seq.steps.length && j < events.length) {
+        const candidate = events[j]!;
+        const step = seq.steps[patternIdx]!;
+        
+        if (candidate.type === step.eventType) {
+          // Check delay
+          if (patternIdx > 0 && step.maxDelayMs !== undefined) {
+            if (candidate.occurredAt - lastMatchTime > step.maxDelayMs) {
+              isValidMatch = false;
+              break;
+            }
+          }
+          
+          // Check variable matching requirements
+          let reqsMet = true;
+          if (step.requireVariablesMatch) {
+            for (const [attrName, varName] of Object.entries(step.requireVariablesMatch)) {
+              if (candidate.attributes[attrName] !== vars[varName]) {
+                reqsMet = false;
+                break;
+              }
+            }
+          }
+          
+          if (!reqsMet) {
+            j++;
+            continue; // Not a match for this step, keep looking forward? (Or break depending on strict contiguity)
+            // For this implementation, we allow non-contiguous matches as long as order is preserved
+          }
+          
+          // Extract variables
+          if (step.extractVariables) {
+            for (const v of step.extractVariables) {
+              const val = candidate.attributes[v.fromAttribute];
+              if (val !== undefined) vars[v.name] = val;
+            }
+          }
+          
+          matchedIds.push(candidate.id);
+          lastMatchTime = candidate.occurredAt;
+          patternIdx++;
+        }
+        
+        j++;
+      }
+      
+      if (isValidMatch && patternIdx === seq.steps.length) {
+        matches.push({
+          sequenceId: seq.id,
+          leadId,
+          matchedEventIds: matchedIds,
+          variables: vars,
+          completedAt: lastMatchTime
+        });
+      }
+    }
+  }
+  
+  return matches;
+}
+
+// --- Immutable State Proof Generation ---
+
+export interface StateProof {
+  readonly stateHash: string;
+  readonly leadCount: number;
+  readonly eventCount: number;
+  readonly totalScore: number;
+  readonly generatedAt: number;
+  readonly merkleRoot: string;
+}
+
+function sha256Mock(input: string): string {
+  // A deterministic, pure mock for a hash function to maintain strict purity/no-crypto constraints
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(i);
+    hash |= 0; // Convert to 32bit integer
+  }
+  // Convert to hex-like string, padded
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function generateStateProof(state: EngineState, timestamp: number): StateProof {
+  const leadIds = Object.keys(state.leads).sort();
+  const eventIds = Object.keys(state.events).sort();
+  
+  let totalScore = 0;
+  const leadHashes: string[] = [];
+  
+  for (const id of leadIds) {
+    totalScore += state.scores[id] ?? 0;
+    const lead = state.leads[id]!;
+    const h = sha256Mock(`${lead.id}|${lead.email}|${lead.lifecycle}|${lead.updatedAt}`);
+    leadHashes.push(h);
+  }
+  
+  const eventHashes: string[] = [];
+  for (const id of eventIds) {
+    const e = state.events[id]!;
+    const h = sha256Mock(`${e.id}|${e.leadId}|${e.type}|${e.occurredAt}`);
+    eventHashes.push(h);
+  }
+  
+  // Build a naive Merkle Tree root for leads
+  let currentLayer = [...leadHashes];
+  while (currentLayer.length > 1) {
+    const nextLayer: string[] = [];
+    for (let i = 0; i < currentLayer.length; i += 2) {
+      if (i + 1 < currentLayer.length) {
+        nextLayer.push(sha256Mock(currentLayer[i]! + currentLayer[i + 1]!));
+      } else {
+        nextLayer.push(currentLayer[i]!); // Odd one out
+      }
+    }
+    currentLayer = nextLayer;
+  }
+  
+  const leadRoot = currentLayer.length > 0 ? currentLayer[0]! : "empty";
+  
+  // Global state hash
+  const stateHash = sha256Mock(`${leadRoot}|${totalScore}|${eventIds.length}|${timestamp}`);
+  
+  return {
+    stateHash,
+    leadCount: leadIds.length,
+    eventCount: eventIds.length,
+    totalScore,
+    generatedAt: timestamp,
+    merkleRoot: leadRoot
+  };
+}
