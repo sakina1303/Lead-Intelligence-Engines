@@ -200,7 +200,8 @@ export function analyzeTrend(dataPoints: readonly TrendDataPoint[], movingAverag
     for (let j = 0; j < movingAveragePeriod; j++) {
       sum += ys[i - j]!;
     }
-    movingAverages.push({ timestamp: xs[i]!, value: sum / movingAveragePeriod, label: sorted[i]!.label });
+    const label = sorted[i]!.label;
+    movingAverages.push({ timestamp: xs[i]!, value: sum / movingAveragePeriod, ...(label !== undefined ? { label } : {}) });
   }
   
   // Inflection points (where slope of moving average changes significantly)
@@ -269,7 +270,7 @@ export function evaluateFunnel(state: EngineState, leadId: string, definition: F
       stageId: stage.id,
       stageName: stage.name,
       enteredAt: stageEntryTime,
-      exitedAt: stageCompletedTime,
+      ...(stageCompletedTime !== undefined ? { exitedAt: stageCompletedTime } : {}),
       dwellMs,
       matchedEventIds,
       completed: stageCompletedTime !== undefined,
@@ -284,6 +285,7 @@ export function evaluateFunnel(state: EngineState, leadId: string, definition: F
   }
   
   const completedStages = stages.filter(s => s.completed).length;
+  const convertedAt = completedStages === definition.stages.length ? stages[stages.length - 1]!.exitedAt : undefined;
   
   return {
     funnelId: definition.id,
@@ -291,9 +293,9 @@ export function evaluateFunnel(state: EngineState, leadId: string, definition: F
     stages,
     completedStages,
     totalStages: definition.stages.length,
-    convertedAt: completedStages === definition.stages.length ? stages[stages.length - 1]!.exitedAt : undefined,
+    ...(convertedAt !== undefined ? { convertedAt } : {}),
     totalDwellMs,
-    dropOffStageId,
+    ...(dropOffStageId !== undefined ? { dropOffStageId } : {}),
   };
 }
 
