@@ -912,9 +912,9 @@ export function clusterRules(rules: readonly ScoringRule[], k: number): readonly
     }
     
     for (let c = 0; c < k; c++) {
-      if (counts[c] > 0) {
+      if (counts[c] !== undefined && counts[c] > 0) {
         for (const key of Object.keys(newCentroids[c]!)) {
-          newCentroids[c]![key] /= counts[c];
+          newCentroids[c]![key] = (newCentroids[c]![key] ?? 0) / counts[c]!;
         }
       }
     }
