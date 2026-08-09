@@ -116,6 +116,7 @@ export interface ScoringRule {
   readonly enabled: boolean;
   readonly priority: number;
   readonly delta: number;
+  readonly dimensionDeltas?: Readonly<Record<string, number>>;
   readonly condition: EventCondition;
   readonly expression?: RuleExpression;
   readonly stopProcessing?: boolean;
@@ -125,6 +126,21 @@ export interface ScorePolicy {
   readonly cap: number;
   readonly floor: number;
   readonly conflictMode: ConflictMode;
+  readonly dimensions?: readonly ScoreDimension[];
+}
+
+export interface ScoreDimension {
+  readonly id: string;
+  readonly label: string;
+  readonly floor: number;
+  readonly cap: number;
+}
+
+export interface ScoreProjection {
+  readonly leadId: LeadId;
+  readonly total: number;
+  readonly dimensions: Readonly<Record<string, number>>;
+  readonly updatedAt: Timestamp;
 }
 
 export interface ScoreExplanation {
@@ -210,6 +226,7 @@ export interface EngineState {
   readonly eventIdsByLead: Readonly<Record<LeadId, readonly EventId[]>>;
   readonly scores: Readonly<Record<LeadId, number>>;
   readonly scoreHistory: Readonly<Record<LeadId, readonly ScoreExplanation[]>>;
+  readonly scoreProjections: Readonly<Record<LeadId, ScoreProjection>>;
   readonly qualifications: Readonly<Record<LeadId, QualificationResult>>;
   readonly segments: Readonly<Record<LeadId, SegmentResult>>;
   readonly profiles: Readonly<Record<LeadId, LeadProfile>>;

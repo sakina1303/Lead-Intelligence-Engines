@@ -9,7 +9,7 @@ export { collectEventEvidence, countEventsByLead, eventsInWindow, queryEventLedg
 export { createEvent, compareEvents } from "./events.js";
 export { normalizeRules, validateRule } from "./scoring-rules.js";
 export { compareNumber, evaluateRuleExpression, explainRuleExpression, expressionRuleMatches, matchingRules, ruleMatches, selectRules } from "./rule-evaluation.js";
-export { clampScore, scoreEvent, scoreForLead } from "./scoring.js";
+export { clampScore, scoreEvent, scoreForLead, scoreProjectionForLead } from "./scoring.js";
 export { evaluateQualification } from "./qualification.js";
 export { assignSegment } from "./segmentation.js";
 export { rankLeads } from "./ranking.js";

@@ -13,6 +13,7 @@ export function createEngineState(config: EngineConfig = defaultEngineConfig): E
     events: {},
     eventIdsByLead: {},
     scores: {},
+    scoreProjections: {},
     scoreHistory: {},
     qualifications: {},
     segments: {},
