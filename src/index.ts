@@ -15,9 +15,3 @@ export { assignSegment } from "./segmentation.js";
 export { rankLeads } from "./ranking.js";
 export { summarize } from "./analytics.js";
 export { replayLeadScoring } from "./replay.js";
-
-export * from "./scoring-rules.js";
-export * from "./rule-evaluation.js";
-export * from "./analytics.js";
-export * from "./leads.js";
-export * from "./scoring.js";

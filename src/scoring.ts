@@ -47,38 +47,3 @@ export function scoreForLead(state: EngineState, leadId: string): number {
 export function scoreProjectionForLead(state: EngineState, leadId: string): ScoreProjection {
   return state.scoreProjections[leadId] ?? { leadId, total: scoreForLead(state, leadId), dimensions: {}, updatedAt: 0 };
 }
-
-// Score Decay Projections
-export type DecayFunctionType = "linear" | "exponential" | "step";
-export interface DecayPolicy { readonly type: DecayFunctionType; readonly halfLifeMs?: number; readonly linearRatePerDay?: number; readonly stepDrops?: ReadonlyArray<{ readonly afterMs: number; readonly dropBy: number }>; }
-export function calculateDecayedScore(baseScore: number, lastUpdateAt: number, evaluateAt: number, policy: DecayPolicy): number {
-    if (evaluateAt <= lastUpdateAt) return baseScore;
-    if (baseScore === 0) return 0;
-    const deltaMs = evaluateAt - lastUpdateAt;
-    switch (policy.type) {
-        case "linear": {
-            const rate = policy.linearRatePerDay ?? 0;
-            const days = deltaMs / (1000 * 60 * 60 * 24);
-            const drop = Math.floor(days * rate);
-            return baseScore > 0 ? Math.max(0, baseScore - drop) : Math.min(0, baseScore + drop);
-        }
-        case "exponential": {
-            const hl = policy.halfLifeMs ?? (1000 * 60 * 60 * 24 * 30);
-            const periods = deltaMs / hl;
-            return Math.round(baseScore * Math.pow(0.5, periods));
-        }
-        case "step": {
-            let current = baseScore;
-            for (const step of (policy.stepDrops ?? [])) {
-                if (deltaMs >= step.afterMs) {
-                    current = current > 0 ? Math.max(0, current - step.dropBy) : Math.min(0, current + step.dropBy);
-                }
-            }
-            return current;
-        }
-    }
-    return baseScore;
-}
-export function projectScoreTimeline(baseScore: number, lastUpdateAt: number, policy: DecayPolicy, intervals: readonly number[]): ReadonlyArray<{ timestamp: number; projectedScore: number }> {
-    return intervals.map(ts => ({ timestamp: ts, projectedScore: calculateDecayedScore(baseScore, lastUpdateAt, ts, policy) }));
-}
