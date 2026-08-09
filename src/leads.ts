@@ -1,4 +1,4 @@
-import type { CreateLeadInput, EngineState, Lead, LifecycleState, Outcome, Timestamp } from "./contracts.js";
+import type { CreateLeadInput, EngineState, Lead, LifecycleState, Outcome, Timestamp, DomainEvent } from "./contracts.js";
 import { failure, success, validEmail, validId, validTimestamp, validateAttributes } from "./validation.js";
 
 const transitions: Readonly<Record<LifecycleState, readonly LifecycleState[]>> = {
@@ -64,4 +64,91 @@ export function transitionLifecycle(state: EngineState, leadId: string, target: 
 
 export function allowedLifecycleTransitions(lifecycle: LifecycleState): readonly LifecycleState[] {
   return transitions[lifecycle];
+}
+
+// --- Deterministic Ownership & Capacity Routing ---
+
+export interface SalesRep {
+  readonly id: string;
+  readonly name: string;
+  readonly territoryId: string;
+  readonly currentActiveLeads: number;
+  readonly maxCapacity: number;
+  readonly isActive: boolean;
+  readonly skills: readonly string[];
+}
+
+export interface RoutingTerritory {
+  readonly id: string;
+  readonly name: string;
+  readonly requiredAttributes: Readonly<Record<string, string>>;
+  readonly fallbackRepId?: string;
+  readonly isGlobal: boolean;
+}
+
+export interface RoutingResult {
+  readonly leadId: string;
+  readonly repId: string | null;
+  readonly territoryId: string | null;
+  readonly reasons: readonly string[];
+}
+
+export function evaluateRoutingTerritory(lead: Lead, territories: readonly RoutingTerritory[]): RoutingTerritory | undefined {
+  const sorted = [...territories].sort((a, b) => b.isGlobal === a.isGlobal ? a.id.localeCompare(b.id) : a.isGlobal ? 1 : -1);
+  return sorted.find(t => {
+    return Object.entries(t.requiredAttributes).every(([k, v]) => lead.attributes[k] === v);
+  });
+}
+
+export function assignSalesRep(lead: Lead, territory: RoutingTerritory, reps: readonly SalesRep[], timestamp: Timestamp): RoutingResult {
+  const eligibleReps = reps.filter(r => r.isActive && (r.territoryId === territory.id || territory.isGlobal) && r.currentActiveLeads < r.maxCapacity);
+  
+  if (eligibleReps.length === 0) {
+    if (territory.fallbackRepId) {
+      const fallback = reps.find(r => r.id === territory.fallbackRepId);
+      if (fallback && fallback.isActive) return { leadId: lead.id, repId: fallback.id, territoryId: territory.id, reasons: ["assigned to territory fallback due to capacity"] };
+    }
+    return { leadId: lead.id, repId: null, territoryId: territory.id, reasons: ["no active reps with capacity in territory"] };
+  }
+
+  // Deterministic round-robin based on state hash mapping to rep index
+  const hashVal = lead.id.split('').reduce((acc, char) => ((acc << 5) - acc) + char.charCodeAt(0), 0) + timestamp;
+  const sortedEligible = eligibleReps.sort((a, b) => a.id.localeCompare(b.id));
+  const selectedIndex = Math.abs(hashVal) % sortedEligible.length;
+  const selected = sortedEligible[selectedIndex]!;
+  
+  return { leadId: lead.id, repId: selected.id, territoryId: territory.id, reasons: ["assigned via deterministic hashing"] };
+}
+
+export function mergeLeadsDeterministic(primary: Lead, secondary: Lead, timestamp: Timestamp): Outcome<Lead> {
+  if (primary.id === secondary.id) return failure("cannot merge lead with itself");
+  if (!validTimestamp(timestamp)) return failure("timestamp must be valid");
+  if (timestamp < primary.updatedAt || timestamp < secondary.updatedAt) return failure("merge timestamp cannot precede lead updates");
+
+  // Deterministic attribute resolution: longest string wins, true wins over false, higher number wins
+  const mergedAttributes = { ...primary.attributes };
+  for (const [key, val] of Object.entries(secondary.attributes)) {
+    const existing = mergedAttributes[key];
+    if (existing === undefined) {
+      mergedAttributes[key] = val;
+    } else if (typeof existing === 'string' && typeof val === 'string') {
+      if (val.length > existing.length) mergedAttributes[key] = val;
+      else if (val.length === existing.length && val.localeCompare(existing) > 0) mergedAttributes[key] = val;
+    } else if (typeof existing === 'number' && typeof val === 'number') {
+      if (val > existing) mergedAttributes[key] = val;
+    } else if (typeof existing === 'boolean' && typeof val === 'boolean') {
+      if (val === true) mergedAttributes[key] = true;
+    }
+  }
+
+  return success({
+    id: primary.id,
+    name: primary.name,
+    email: primary.email,
+    company: primary.company || secondary.company,
+    attributes: mergedAttributes,
+    lifecycle: primary.lifecycle, 
+    createdAt: Math.min(primary.createdAt, secondary.createdAt),
+    updatedAt: timestamp
+  });
 }
