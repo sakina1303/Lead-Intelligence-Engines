@@ -34,19 +34,6 @@ export function summarize(state: EngineState): AnalyticsSummary {
 
 import type { CohortDefinition, CohortMembership, CohortMetrics, CohortComparison, TrendDataPoint, TrendAnalysis, FunnelDefinition, FunnelResult, FunnelStageResult, FunnelAggregation, FunnelStageAggregation } from "./contracts.js";
 
-export function getAnalyticsReport(state: EngineState): AnalyticsSummary {
-  return {
-    totalLeads: Object.keys(state.leads).length,
-    totalEvents: Object.keys(state.events).length,
-    activeLeads: 0,
-    averageScore: 0,
-    leadsByLifecycle: {},
-    leadsByQualification: { unqualified: 0, "marketing-qualified": 0, "sales-qualified": 0, disqualified: 0 },
-    leadsBySegment: {},
-    eventCountsByCategory: {},
-  };
-}
-
 // --- Cohort Analysis ---
 
 export function analyzeCohort(state: EngineState, definition: CohortDefinition): CohortMetrics {
