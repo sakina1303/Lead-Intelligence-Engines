@@ -208,7 +208,7 @@ export const defaultSaaSEngineConfig = new EngineConfigBuilder()
     name: "Enterprise",
     priority: 100,
     minimumScore: 50,
-    requiredAttributes: { company_size: "1000+" }
+    requiredAttributes: [{ key: "company_size", equals: "1000+" }]
   })
   .buildUnsafe();
 
