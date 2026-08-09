@@ -870,3 +870,271 @@ export function simulateMMM(channels: readonly MarketingChannel[]): MMMSimulatio
     suggestedReallocation: suggested
   };
 }
+
+// --- Multidimensional Segmentation Cubes (OLAP-lite) ---
+
+export interface CubeDimension {
+  readonly name: string;
+  readonly extractValue: (lead: Lead, score: number, events: readonly DomainEvent[]) => string;
+}
+
+export interface CubeMeasure {
+  readonly name: string;
+  readonly calculate: (leads: readonly Lead[], scores: readonly number[], events: readonly DomainEvent[][]) => number;
+}
+
+export interface CubeCell {
+  readonly coordinates: Readonly<Record<string, string>>;
+  readonly measures: Readonly<Record<string, number>>;
+  readonly leadCount: number;
+}
+
+export interface DataCube {
+  readonly dimensions: readonly string[];
+  readonly measures: readonly string[];
+  readonly cells: readonly CubeCell[];
+}
+
+export function buildDataCube(
+  state: EngineState,
+  dimensions: readonly CubeDimension[],
+  measures: readonly CubeMeasure[]
+): DataCube {
+  const cellMap = new Map<string, { coords: Record<string, string>, leads: Lead[], scores: number[], events: DomainEvent[][] }>();
+  
+  for (const lead of Object.values(state.leads)) {
+    const score = state.scores[lead.id] ?? 0;
+    const events = state.eventIdsByLead[lead.id]?.map(id => state.events[id]!) ?? [];
+    
+    const coords: Record<string, string> = {};
+    for (const dim of dimensions) {
+      coords[dim.name] = dim.extractValue(lead, score, events);
+    }
+    
+    const key = JSON.stringify(coords);
+    const cell = cellMap.get(key);
+    
+    if (cell) {
+      cell.leads.push(lead);
+      cell.scores.push(score);
+      cell.events.push(events);
+    } else {
+      cellMap.set(key, { coords, leads: [lead], scores: [score], events: [events] });
+    }
+  }
+  
+  const cells: CubeCell[] = [];
+  
+  for (const cell of cellMap.values()) {
+    const computedMeasures: Record<string, number> = {};
+    for (const m of measures) {
+      computedMeasures[m.name] = m.calculate(cell.leads, cell.scores, cell.events);
+    }
+    cells.push({
+      coordinates: cell.coords,
+      measures: computedMeasures,
+      leadCount: cell.leads.length
+    });
+  }
+  
+  return {
+    dimensions: dimensions.map(d => d.name),
+    measures: measures.map(m => m.name),
+    cells
+  };
+}
+
+// --- Propensity to Buy Models (Logistic Regression Mock) ---
+
+export interface PropensityModel {
+  readonly weights: Readonly<Record<string, number>>; // feature name -> weight
+  readonly intercept: number;
+}
+
+export function calculateBuyPropensity(
+  lead: Lead,
+  events: readonly DomainEvent[],
+  model: PropensityModel
+): number {
+  const features = extractEventFeatures(events);
+  
+  let logit = model.intercept;
+  
+  for (const [feat, val] of Object.entries(features)) {
+    if (typeof val === 'number' && model.weights[feat]) {
+      logit += val * model.weights[feat]!;
+    }
+  }
+  
+  // Sigmoid function
+  const probability = 1 / (1 + Math.exp(-logit));
+  
+  return probability;
+}
+
+// --- Graph-Based Lead Association Analytics ---
+
+export interface LeadNode {
+  readonly leadId: string;
+  readonly score: number;
+}
+
+export interface LeadEdge {
+  readonly sourceLeadId: string;
+  readonly targetLeadId: string;
+  readonly relationType: string;
+  readonly weight: number;
+}
+
+export interface LeadGraph {
+  readonly nodes: readonly LeadNode[];
+  readonly edges: readonly LeadEdge[];
+}
+
+export interface CentralityResult {
+  readonly leadId: string;
+  readonly degreeCentrality: number; // total connections
+  readonly scoreWeightedCentrality: number; // sum of connected scores
+}
+
+export function analyzeLeadNetwork(graph: LeadGraph): readonly CentralityResult[] {
+  const degreeMap = new Map<string, number>();
+  const scoreMap = new Map<string, number>();
+  
+  for (const node of graph.nodes) {
+    degreeMap.set(node.leadId, 0);
+    scoreMap.set(node.leadId, 0);
+  }
+  
+  const nodeScores = new Map(graph.nodes.map(n => [n.leadId, n.score]));
+  
+  for (const edge of graph.edges) {
+    const currentDegS = degreeMap.get(edge.sourceLeadId) ?? 0;
+    const currentDegT = degreeMap.get(edge.targetLeadId) ?? 0;
+    
+    degreeMap.set(edge.sourceLeadId, currentDegS + edge.weight);
+    degreeMap.set(edge.targetLeadId, currentDegT + edge.weight);
+    
+    const currentScoreS = scoreMap.get(edge.sourceLeadId) ?? 0;
+    const currentScoreT = scoreMap.get(edge.targetLeadId) ?? 0;
+    
+    scoreMap.set(edge.sourceLeadId, currentScoreS + (nodeScores.get(edge.targetLeadId) ?? 0) * edge.weight);
+    scoreMap.set(edge.targetLeadId, currentScoreT + (nodeScores.get(edge.sourceLeadId) ?? 0) * edge.weight);
+  }
+  
+  const results: CentralityResult[] = [];
+  for (const node of graph.nodes) {
+    results.push({
+      leadId: node.leadId,
+      degreeCentrality: degreeMap.get(node.leadId) ?? 0,
+      scoreWeightedCentrality: scoreMap.get(node.leadId) ?? 0
+    });
+  }
+  
+  return results.sort((a, b) => b.scoreWeightedCentrality - a.scoreWeightedCentrality);
+}
+
+// --- Customer Journey Mapping ---
+
+export interface JourneyStage {
+  readonly name: string;
+  readonly definingEvents: readonly string[];
+}
+
+export interface JourneyMap {
+  readonly leadId: string;
+  readonly stagesReached: readonly { readonly stageName: string; readonly reachedAt: number }[];
+  readonly dropOffStage: string | null;
+  readonly timeToConvertMs: number | null;
+}
+
+export function mapCustomerJourney(
+  state: EngineState,
+  leadId: string,
+  stages: readonly JourneyStage[]
+): JourneyMap {
+  const events = state.eventIdsByLead[leadId]?.map(id => state.events[id]!).sort((a, b) => a.occurredAt - b.occurredAt) ?? [];
+  
+  const reached: { stageName: string; reachedAt: number }[] = [];
+  let dropOff: string | null = null;
+  
+  if (stages.length === 0) return { leadId, stagesReached: [], dropOffStage: null, timeToConvertMs: null };
+  
+  let currentEventIdx = 0;
+  
+  for (let i = 0; i < stages.length; i++) {
+    const stage = stages[i]!;
+    let found = false;
+    
+    for (let j = currentEventIdx; j < events.length; j++) {
+      if (stage.definingEvents.includes(events[j]!.type)) {
+        reached.push({ stageName: stage.name, reachedAt: events[j]!.occurredAt });
+        currentEventIdx = j + 1;
+        found = true;
+        break;
+      }
+    }
+    
+    if (!found) {
+      dropOff = stage.name;
+      break;
+    }
+  }
+  
+  let timeToConvertMs = null;
+  if (reached.length === stages.length && reached.length > 0) {
+    const firstTime = events.length > 0 ? events[0]!.occurredAt : reached[0]!.reachedAt;
+    timeToConvertMs = reached[reached.length - 1]!.reachedAt - firstTime;
+  }
+  
+  return {
+    leadId,
+    stagesReached: reached,
+    dropOffStage: dropOff,
+    timeToConvertMs
+  };
+}
+
+// --- Lead Aging & Stagnation Analysis ---
+
+export interface LeadStagnationReport {
+  readonly totalStagnantLeads: number;
+  readonly stagnantLeadsByLifecycle: Readonly<Record<string, number>>;
+  readonly averageDaysSinceLastEvent: number;
+  readonly potentialValueAtRisk: number; // Sum of scores for stagnant leads
+}
+
+export function analyzeLeadStagnation(
+  state: EngineState,
+  now: number,
+  stagnationThresholdMs: number = 30 * 86400000 // 30 days
+): LeadStagnationReport {
+  let stagnantCount = 0;
+  const byLifecycle: Record<string, number> = {};
+  let totalDays = 0;
+  let valueAtRisk = 0;
+  
+  for (const lead of Object.values(state.leads)) {
+    // Ignore already converted/rejected
+    if (lead.lifecycle === "converted" || lead.lifecycle === "rejected") continue;
+    
+    const events = state.eventIdsByLead[lead.id]?.map(id => state.events[id]!) ?? [];
+    const lastEventTime = events.length > 0 ? Math.max(...events.map(e => e.occurredAt)) : lead.createdAt;
+    
+    const ageMs = now - lastEventTime;
+    
+    if (ageMs > stagnationThresholdMs) {
+      stagnantCount++;
+      byLifecycle[lead.lifecycle] = (byLifecycle[lead.lifecycle] ?? 0) + 1;
+      totalDays += ageMs / 86400000;
+      valueAtRisk += state.scores[lead.id] ?? 0;
+    }
+  }
+  
+  return {
+    totalStagnantLeads: stagnantCount,
+    stagnantLeadsByLifecycle: byLifecycle,
+    averageDaysSinceLastEvent: stagnantCount === 0 ? 0 : totalDays / stagnantCount,
+    potentialValueAtRisk: valueAtRisk
+  };
+}
