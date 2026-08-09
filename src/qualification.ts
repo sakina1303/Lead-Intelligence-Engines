@@ -507,7 +507,7 @@ export function applyCapacityRouting(
     
     if (node.currentLoad >= node.maxCapacity) {
       if (node.overflowState) {
-        currentState = node.overflowState;
+        currentState = node.overflowState as import("./contracts.js").QualificationState;
         overflowTriggered = true;
       } else {
         // If no overflow defined but at capacity, fail qualification
