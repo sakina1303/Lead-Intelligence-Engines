@@ -90,3 +90,357 @@ export function selectQualification(results: readonly QualificationResult[]): Qu
 export function buildQualificationEvidenceChain(results: readonly QualificationResult[]): readonly string[] {
   return results.map(r => `[${r.policyId} -> ${r.state}]: ${r.reasons.join(', ')}`);
 }
+
+// --- Qualification State Machines ---
+
+export interface QualificationTransitionDef {
+  readonly fromState: string;
+  readonly toState: string;
+  readonly requiredEvents: readonly string[];
+  readonly requiredMinScore?: number;
+  readonly requiredMaxScore?: number;
+  readonly minTimeInStateMs?: number;
+  readonly maxTimeInStateMs?: number;
+}
+
+export interface QualificationStateMachine {
+  readonly id: string;
+  readonly initialState: string;
+  readonly transitions: readonly QualificationTransitionDef[];
+}
+
+export interface QualificationStateContext {
+  readonly leadId: string;
+  readonly currentState: string;
+  readonly enteredAt: number;
+  readonly transitionHistory: readonly { readonly state: string; readonly enteredAt: number }[];
+}
+
+export function evaluateStateMachineTransition(
+  machine: QualificationStateMachine,
+  context: QualificationStateContext,
+  score: number,
+  events: readonly DomainEvent[],
+  evaluatedAt: Timestamp
+): { readonly nextState: string; readonly appliedTransition?: QualificationTransitionDef } {
+  
+  const timeInStateMs = evaluatedAt - context.enteredAt;
+  const possibleTransitions = machine.transitions.filter(t => t.fromState === context.currentState);
+  
+  // Sort transitions by complexity or priority (assume array order is priority for now)
+  for (const t of possibleTransitions) {
+    // 1. Time constraints
+    if (t.minTimeInStateMs !== undefined && timeInStateMs < t.minTimeInStateMs) continue;
+    if (t.maxTimeInStateMs !== undefined && timeInStateMs > t.maxTimeInStateMs) continue;
+    
+    // 2. Score constraints
+    if (t.requiredMinScore !== undefined && score < t.requiredMinScore) continue;
+    if (t.requiredMaxScore !== undefined && score > t.requiredMaxScore) continue;
+    
+    // 3. Event constraints
+    let hasAllEvents = true;
+    for (const reqEvent of t.requiredEvents) {
+      if (!events.find(e => e.type === reqEvent && e.occurredAt >= context.enteredAt)) {
+        hasAllEvents = false;
+        break;
+      }
+    }
+    
+    if (hasAllEvents) {
+      return { nextState: t.toState, appliedTransition: t };
+    }
+  }
+  
+  return { nextState: context.currentState };
+}
+
+// --- Qualification SLA Monitoring ---
+
+export interface QualificationSLADef {
+  readonly stateToMonitor: string;
+  readonly targetActionState: string;
+  readonly slaBreachMs: number;
+}
+
+export interface SLABreachResult {
+  readonly breached: boolean;
+  readonly timeInStateMs: number;
+  readonly excessMs: number;
+}
+
+export function evaluateQualificationSLA(context: QualificationStateContext, sla: QualificationSLADef, evaluatedAt: Timestamp): SLABreachResult {
+  if (context.currentState !== sla.stateToMonitor) {
+    return { breached: false, timeInStateMs: 0, excessMs: 0 };
+  }
+  
+  const timeInState = evaluatedAt - context.enteredAt;
+  const excess = timeInState - sla.slaBreachMs;
+  
+  return {
+    breached: excess > 0,
+    timeInStateMs: timeInState,
+    excessMs: Math.max(0, excess)
+  };
+}
+
+// --- Hysteresis and Cooldown Management ---
+
+export interface HysteresisConfig {
+  readonly qualificationThreshold: number;
+  readonly disqualificationThreshold: number;
+  readonly cooldownMs: number;
+}
+
+export interface HysteresisContext {
+  readonly lastQualificationChangeAt: number;
+  readonly isCurrentlyQualified: boolean;
+}
+
+export function evaluateHysteresisQualification(
+  score: number,
+  config: HysteresisConfig,
+  context: HysteresisContext,
+  evaluatedAt: Timestamp
+): { readonly isQualified: boolean; readonly changed: boolean } {
+  
+  const timeSinceLastChange = evaluatedAt - context.lastQualificationChangeAt;
+  if (timeSinceLastChange < config.cooldownMs) {
+    // In cooldown, cannot change state
+    return { isQualified: context.isCurrentlyQualified, changed: false };
+  }
+  
+  if (context.isCurrentlyQualified) {
+    // Check if we drop below disqualification threshold
+    if (score < config.disqualificationThreshold) {
+      return { isQualified: false, changed: true };
+    }
+    return { isQualified: true, changed: false };
+  } else {
+    // Check if we rise above qualification threshold
+    if (score >= config.qualificationThreshold) {
+      return { isQualified: true, changed: true };
+    }
+    return { isQualified: false, changed: false };
+  }
+}
+
+// --- Multi-Step Qualification Funnels ---
+
+export interface FunnelStage {
+  readonly name: string;
+  readonly order: number;
+  readonly policies: readonly QualificationPolicy[];
+}
+
+export interface FunnelDef {
+  readonly id: string;
+  readonly stages: readonly FunnelStage[];
+}
+
+export interface FunnelProgress {
+  readonly leadId: string;
+  readonly highestStageReached: string;
+  readonly highestStageOrder: number;
+  readonly stageResults: Readonly<Record<string, QualificationResult>>;
+  readonly isFullyQualified: boolean;
+}
+
+export function evaluateFunnelProgress(lead: Lead, score: number, events: readonly DomainEvent[], funnel: FunnelDef, evaluatedAt: Timestamp): FunnelProgress {
+  const sortedStages = [...funnel.stages].sort((a, b) => a.order - b.order);
+  
+  let highestReached = "none";
+  let highestOrder = -1;
+  const stageResults: Record<string, QualificationResult> = {};
+  
+  for (const stage of sortedStages) {
+    let stageQualified = false;
+    let bestResult: QualificationResult | undefined = undefined;
+    
+    for (const policy of stage.policies) {
+      const res = evaluateQualification(lead, score, events, policy, evaluatedAt);
+      if (res.state !== "unqualified") {
+        stageQualified = true;
+        bestResult = res;
+        break;
+      }
+      bestResult = res; // keep the last failure reason if none pass
+    }
+    
+    if (bestResult) {
+      stageResults[stage.name] = bestResult;
+    }
+    
+    if (stageQualified) {
+      highestReached = stage.name;
+      highestOrder = stage.order;
+    } else {
+      // Funnel breaks here
+      break;
+    }
+  }
+  
+  return {
+    leadId: lead.id,
+    highestStageReached: highestReached,
+    highestStageOrder: highestOrder,
+    stageResults,
+    isFullyQualified: highestOrder === sortedStages[sortedStages.length - 1]?.order
+  };
+}
+
+// --- Qualification Scenario Simulation (What-If) ---
+
+export interface SimulationScenario {
+  readonly scoreDelta: number;
+  readonly extraEvents: readonly DomainEvent[];
+  readonly timeOffsetMs: number;
+}
+
+export function simulateQualificationScenario(
+  lead: Lead,
+  currentScore: number,
+  currentEvents: readonly DomainEvent[],
+  policy: QualificationPolicy,
+  currentTimestamp: Timestamp,
+  scenario: SimulationScenario
+): QualificationResult {
+  
+  const simulatedScore = currentScore + scenario.scoreDelta;
+  const simulatedEvents = [...currentEvents, ...scenario.extraEvents].sort((a, b) => a.occurredAt - b.occurredAt);
+  const simulatedTime = currentTimestamp + scenario.timeOffsetMs;
+  
+  return evaluateQualification(lead, simulatedScore, simulatedEvents, policy, simulatedTime);
+}
+
+export function batchSimulateScenarios(
+  lead: Lead,
+  currentScore: number,
+  currentEvents: readonly DomainEvent[],
+  policy: QualificationPolicy,
+  currentTimestamp: Timestamp,
+  scenarios: readonly SimulationScenario[]
+): readonly QualificationResult[] {
+  return scenarios.map(scenario => simulateQualificationScenario(lead, currentScore, currentEvents, policy, currentTimestamp, scenario));
+}
+
+// --- Qualification Cohort Grouping ---
+
+export interface CohortDef {
+  readonly id: string;
+  readonly name: string;
+  readonly basePolicy: QualificationPolicy;
+  readonly attributeFilters?: Readonly<Record<string, string | number | boolean>>;
+}
+
+export interface CohortResult {
+  readonly cohortId: string;
+  readonly qualifiedCount: number;
+  readonly totalEvaluated: number;
+  readonly passRate: number;
+  readonly qualifiedLeadIds: readonly string[];
+}
+
+export function analyzeQualificationCohorts(
+  leads: readonly Lead[],
+  scores: Readonly<Record<string, number>>,
+  eventsByLead: Readonly<Record<string, readonly DomainEvent[]>>,
+  cohorts: readonly CohortDef[],
+  evaluatedAt: Timestamp
+): readonly CohortResult[] {
+  
+  const results: CohortResult[] = [];
+  
+  for (const cohort of cohorts) {
+    let total = 0;
+    const qualifiedIds: string[] = [];
+    
+    for (const lead of leads) {
+      // Check filters
+      let matchFilter = true;
+      if (cohort.attributeFilters) {
+        for (const [k, v] of Object.entries(cohort.attributeFilters)) {
+          if (lead.attributes[k] !== v) {
+            matchFilter = false;
+            break;
+          }
+        }
+      }
+      
+      if (!matchFilter) continue;
+      
+      total++;
+      const score = scores[lead.id] ?? 0;
+      const events = eventsByLead[lead.id] ?? [];
+      
+      const res = evaluateQualification(lead, score, events, cohort.basePolicy, evaluatedAt);
+      if (res.state !== "unqualified") {
+        qualifiedIds.push(lead.id);
+      }
+    }
+    
+    results.push({
+      cohortId: cohort.id,
+      totalEvaluated: total,
+      qualifiedCount: qualifiedIds.length,
+      passRate: total === 0 ? 0 : qualifiedIds.length / total,
+      qualifiedLeadIds: qualifiedIds.sort()
+    });
+  }
+  
+  return results.sort((a, b) => b.passRate - a.passRate || a.cohortId.localeCompare(b.cohortId));
+}
+
+// --- Complex Qualification Dependencies ---
+
+export interface QualificationDependencyGraph {
+  readonly policyId: string;
+  readonly dependsOnPolicyIds: readonly string[];
+  readonly condition: "ALL" | "ANY" | "NONE";
+}
+
+export function evaluateDependentQualification(
+  lead: Lead,
+  score: number,
+  events: readonly DomainEvent[],
+  policy: QualificationPolicy,
+  dependencies: QualificationDependencyGraph,
+  priorResults: Readonly<Record<string, QualificationResult>>,
+  evaluatedAt: Timestamp
+): QualificationResult {
+  
+  let depsMet = false;
+  
+  if (dependencies.dependsOnPolicyIds.length === 0) {
+    depsMet = true;
+  } else {
+    const depStates = dependencies.dependsOnPolicyIds.map(id => {
+      const res = priorResults[id];
+      return res ? res.state !== "unqualified" : false;
+    });
+    
+    switch (dependencies.condition) {
+      case "ALL":
+        depsMet = depStates.every(s => s);
+        break;
+      case "ANY":
+        depsMet = depStates.some(s => s);
+        break;
+      case "NONE":
+        depsMet = depStates.every(s => !s);
+        break;
+    }
+  }
+  
+  if (!depsMet) {
+    return {
+      leadId: lead.id,
+      policyId: policy.id,
+      state: "unqualified",
+      evaluatedAt,
+      reasons: [`Dependencies not met (Condition: ${dependencies.condition})`]
+    };
+  }
+  
+  return evaluateQualification(lead, score, events, policy, evaluatedAt);
+}
+
