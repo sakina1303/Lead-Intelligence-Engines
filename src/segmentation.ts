@@ -209,7 +209,7 @@ export interface DecisionTreeNode {
 }
 
 export function evaluateDecisionTree(lead: Lead, score: number, events: readonly DomainEvent[], tree: DecisionTreeNode): string {
-  const features = {
+  const features: Record<string, any> = {
     ...lead.attributes,
     score,
     eventCount: events.length,
@@ -449,57 +449,12 @@ export function generateDynamicPolicy(
   return {
     id: policyId,
     fallback: fallbackSegment,
-    rules,
+    rules: rules as any,
     advancedRules: rules
   };
 }
 
-export interface DecisionTreeNode {
-  readonly attribute?: string; // e.g. "score", "events_count", or an attribute key
-  readonly operator?: ">" | "<" | "==" | "includes";
-  readonly value?: any;
-  readonly trueBranch?: DecisionTreeNode;
-  readonly falseBranch?: DecisionTreeNode;
-  readonly segmentOutcome?: string;
-}
 
-export function evaluateDecisionTreeSegment(lead: Lead, score: number, events: readonly DomainEvent[], node: DecisionTreeNode): string | undefined {
-  if (node.segmentOutcome !== undefined) return node.segmentOutcome;
-  
-  if (!node.attribute || !node.operator) return undefined;
-  
-  let actualValue: any = undefined;
-  
-  if (node.attribute === "score") {
-    actualValue = score;
-  } else if (node.attribute === "events_count") {
-    actualValue = events.length;
-  } else {
-    actualValue = lead.attributes[node.attribute];
-  }
-  
-  let matched = false;
-  if (actualValue !== undefined) {
-    switch (node.operator) {
-      case ">": matched = actualValue > node.value; break;
-      case "<": matched = actualValue < node.value; break;
-      case "==": matched = actualValue === node.value; break;
-      case "includes": 
-        if (Array.isArray(actualValue) || typeof actualValue === 'string') {
-          matched = actualValue.includes(node.value);
-        }
-        break;
-    }
-  }
-  
-  if (matched && node.trueBranch) {
-    return evaluateDecisionTreeSegment(lead, score, events, node.trueBranch);
-  } else if (!matched && node.falseBranch) {
-    return evaluateDecisionTreeSegment(lead, score, events, node.falseBranch);
-  }
-  
-  return undefined;
-}
 
 // --- K-Dimensional Tree for Segment Nearest Neighbors (Deterministic) ---
 // Useful for finding similar leads based on multi-dimensional scores
