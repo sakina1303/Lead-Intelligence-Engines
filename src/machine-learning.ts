@@ -101,9 +101,11 @@ export function kMeansClustering(state: EngineState, config: ClusteringConfig = 
       }
       
       for (let i = 0; i < config.k; i++) {
-        if (clusterCounts[i]! > 0) {
+        const count = clusterCounts[i] ?? 0;
+        const centroid = centroids[i];
+        if (count > 0 && centroid) {
           for (const d of dimensions) {
-            centroids[i]![d] = (newCentroids[i]![d] ?? 0) / clusterCounts[i]!;
+            centroid[d] = (newCentroids[i]![d] ?? 0) / count;
           }
         }
       }
