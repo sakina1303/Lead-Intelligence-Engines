@@ -127,7 +127,7 @@ export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
         if (typeof t.name === "string" && typeof t.value === "number") {
           config.qualificationPolicies = [...config.qualificationPolicies, {
             id: `qual-${t.name.toLowerCase().replace(/\s+/g, "-")}`,
-            qualification: "qualified" as import("./contracts.js").QualificationState,
+            qualification: "marketing-qualified",
             minimumScore: t.value,
           }];
         }
