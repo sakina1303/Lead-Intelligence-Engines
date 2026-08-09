@@ -246,3 +246,328 @@ export interface EventProcessResult {
   readonly segment?: SegmentResult;
   readonly errors?: readonly string[];
 }
+
+// --- Attribution ---
+
+export type AttributionModelType = "first-touch" | "last-touch" | "linear" | "time-decay" | "position-based" | "w-shaped";
+
+export interface TouchPoint {
+  readonly eventId: EventId;
+  readonly leadId: LeadId;
+  readonly channel: string;
+  readonly category: EventCategory;
+  readonly occurredAt: Timestamp;
+  readonly isConversion: boolean;
+}
+
+export interface AttributionWeight {
+  readonly touchPointEventId: EventId;
+  readonly weight: number;
+  readonly normalizedWeight: number;
+  readonly position: number;
+  readonly totalTouchPoints: number;
+}
+
+export interface AttributionResult {
+  readonly leadId: LeadId;
+  readonly model: AttributionModelType;
+  readonly touchPoints: readonly TouchPoint[];
+  readonly weights: readonly AttributionWeight[];
+  readonly conversionEventId?: EventId;
+  readonly totalWeight: number;
+}
+
+// --- Cohorts ---
+
+export interface CohortDefinition {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly createdAtFrom: Timestamp;
+  readonly createdAtTo: Timestamp;
+  readonly requiredAttributes?: Attributes;
+  readonly requiredLifecycles?: readonly LifecycleState[];
+  readonly minimumScore?: number;
+  readonly maximumScore?: number;
+}
+
+export interface CohortMembership {
+  readonly cohortId: string;
+  readonly leadId: LeadId;
+  readonly joinedAt: Timestamp;
+  readonly score: number;
+  readonly lifecycle: LifecycleState;
+}
+
+export interface CohortMetrics {
+  readonly cohortId: string;
+  readonly memberCount: number;
+  readonly averageScore: number;
+  readonly medianScore: number;
+  readonly scoreStdDev: number;
+  readonly minScore: number;
+  readonly maxScore: number;
+  readonly conversionRate: number;
+  readonly averageEventsPerLead: number;
+  readonly lifecycleDistribution: Readonly<Record<LifecycleState, number>>;
+  readonly qualificationDistribution: Readonly<Record<QualificationState, number>>;
+}
+
+export interface CohortComparison {
+  readonly cohortA: CohortMetrics;
+  readonly cohortB: CohortMetrics;
+  readonly scoreDelta: number;
+  readonly conversionRateDelta: number;
+  readonly eventRateDelta: number;
+}
+
+// --- Funnels ---
+
+export interface FunnelDefinition {
+  readonly id: string;
+  readonly name: string;
+  readonly stages: readonly FunnelStageDefinition[];
+  readonly conversionWindow: Timestamp;
+}
+
+export interface FunnelStageDefinition {
+  readonly id: string;
+  readonly name: string;
+  readonly requiredEventTypes: readonly string[];
+  readonly requiredCategories?: readonly EventCategory[];
+  readonly minimumScore?: number;
+  readonly maximumDwellMs?: Timestamp;
+}
+
+export interface FunnelStageResult {
+  readonly stageId: string;
+  readonly stageName: string;
+  readonly enteredAt: Timestamp;
+  readonly exitedAt?: Timestamp;
+  readonly dwellMs: number;
+  readonly matchedEventIds: readonly EventId[];
+  readonly completed: boolean;
+}
+
+export interface FunnelResult {
+  readonly funnelId: string;
+  readonly leadId: LeadId;
+  readonly stages: readonly FunnelStageResult[];
+  readonly completedStages: number;
+  readonly totalStages: number;
+  readonly convertedAt?: Timestamp;
+  readonly totalDwellMs: number;
+  readonly dropOffStageId?: string;
+}
+
+export interface FunnelAggregation {
+  readonly funnelId: string;
+  readonly totalLeads: number;
+  readonly stageMetrics: readonly FunnelStageAggregation[];
+  readonly overallConversionRate: number;
+}
+
+export interface FunnelStageAggregation {
+  readonly stageId: string;
+  readonly enteredCount: number;
+  readonly completedCount: number;
+  readonly dropOffCount: number;
+  readonly conversionRate: number;
+  readonly averageDwellMs: number;
+  readonly medianDwellMs: number;
+}
+
+// --- Routing Policies ---
+
+export interface RoutingPolicy {
+  readonly id: string;
+  readonly name: string;
+  readonly strategy: "round-robin" | "capacity-weighted" | "skill-match" | "territory-priority";
+  readonly territories: readonly TerritoryDefinition[];
+  readonly capacityConstraints: CapacityConstraint;
+  readonly fallbackStrategy: "queue" | "overflow-territory" | "reject";
+  readonly overflowTerritoryId?: string;
+}
+
+export interface TerritoryDefinition {
+  readonly id: string;
+  readonly name: string;
+  readonly requiredAttributes: readonly AttributeCondition[];
+  readonly priority: number;
+  readonly maxLeads: number;
+  readonly requiredSkills?: readonly string[];
+}
+
+export interface CapacityConstraint {
+  readonly maxLeadsPerRep: number;
+  readonly maxLeadsPerTerritory: number;
+  readonly reserveCapacityPercent: number;
+}
+
+export interface RoutingDecision {
+  readonly leadId: LeadId;
+  readonly policyId: string;
+  readonly matchedTerritoryId?: string;
+  readonly assignedRepId?: string;
+  readonly strategy: RoutingPolicy["strategy"];
+  readonly evaluatedAt: Timestamp;
+  readonly reasons: readonly string[];
+  readonly fallbackUsed: boolean;
+  readonly capacityRemaining: number;
+}
+
+// --- Simulation ---
+
+export interface SimulationConfig {
+  readonly id: string;
+  readonly name: string;
+  readonly baseRules: readonly ScoringRule[];
+  readonly variantRules: readonly ScoringRule[];
+  readonly targetLeadIds?: readonly LeadId[];
+  readonly evaluateAt: Timestamp;
+  readonly includeDecay?: boolean;
+}
+
+export interface SimulationLeadResult {
+  readonly leadId: LeadId;
+  readonly baseScore: number;
+  readonly variantScore: number;
+  readonly scoreDelta: number;
+  readonly baseQualification: QualificationState;
+  readonly variantQualification: QualificationState;
+  readonly qualificationChanged: boolean;
+  readonly baseRuleMatches: readonly RuleId[];
+  readonly variantRuleMatches: readonly RuleId[];
+  readonly newlyMatched: readonly RuleId[];
+  readonly droppedMatches: readonly RuleId[];
+}
+
+export interface SimulationResult {
+  readonly configId: string;
+  readonly leadResults: readonly SimulationLeadResult[];
+  readonly totalLeadsAffected: number;
+  readonly averageScoreDelta: number;
+  readonly qualificationChanges: number;
+  readonly scoreDistributionBefore: ScoreDistribution;
+  readonly scoreDistributionAfter: ScoreDistribution;
+}
+
+export interface ScoreDistribution {
+  readonly min: number;
+  readonly max: number;
+  readonly mean: number;
+  readonly median: number;
+  readonly standardDeviation: number;
+  readonly percentiles: Readonly<Record<string, number>>;
+}
+
+// --- State Auditing ---
+
+export type InvariantKind =
+  | "orphaned-event"
+  | "orphaned-score"
+  | "missing-lead-events-index"
+  | "score-history-mismatch"
+  | "score-projection-stale"
+  | "qualification-stale"
+  | "segment-stale"
+  | "profile-orphaned"
+  | "history-orphaned"
+  | "event-order-violation"
+  | "duplicate-event-id"
+  | "negative-score-below-floor"
+  | "score-above-cap";
+
+export interface StateInvariantViolation {
+  readonly kind: InvariantKind;
+  readonly entityId: string;
+  readonly entityType: "lead" | "event" | "score" | "profile" | "history";
+  readonly message: string;
+  readonly severity: "error" | "warning" | "info";
+}
+
+export interface StateAuditResult {
+  readonly violations: readonly StateInvariantViolation[];
+  readonly auditedLeads: number;
+  readonly auditedEvents: number;
+  readonly isConsistent: boolean;
+  readonly summary: Readonly<Record<InvariantKind, number>>;
+}
+
+// --- Trends & Correlation ---
+
+export interface TrendDataPoint {
+  readonly timestamp: Timestamp;
+  readonly value: number;
+  readonly label?: string;
+}
+
+export interface TrendAnalysis {
+  readonly dataPoints: readonly TrendDataPoint[];
+  readonly slope: number;
+  readonly intercept: number;
+  readonly rSquared: number;
+  readonly movingAverages: readonly TrendDataPoint[];
+  readonly direction: "increasing" | "decreasing" | "stable";
+  readonly inflectionPoints: readonly TrendDataPoint[];
+}
+
+export interface CorrelationResult {
+  readonly dimensionA: string;
+  readonly dimensionB: string;
+  readonly coefficient: number;
+  readonly sampleSize: number;
+  readonly strength: "strong" | "moderate" | "weak" | "none";
+}
+
+// --- Lead Comparison ---
+
+export interface LeadFieldDiff {
+  readonly field: string;
+  readonly valueA: Scalar | undefined;
+  readonly valueB: Scalar | undefined;
+  readonly changed: boolean;
+}
+
+export interface LeadComparisonResult {
+  readonly leadIdA: LeadId;
+  readonly leadIdB: LeadId;
+  readonly fieldDiffs: readonly LeadFieldDiff[];
+  readonly attributeDiffs: readonly LeadFieldDiff[];
+  readonly scoreDiff: number;
+  readonly sameLifecycle: boolean;
+  readonly sameSegment: boolean;
+  readonly similarityScore: number;
+}
+
+// --- Batch Policies ---
+
+export interface BatchPolicy {
+  readonly id: string;
+  readonly maxBatchSize: number;
+  readonly conflictStrategy: "skip" | "overwrite" | "merge" | "error";
+  readonly validationMode: "strict" | "lenient" | "skip";
+  readonly orderingStrategy: "chronological" | "priority" | "lead-grouped";
+  readonly enableRollback: boolean;
+  readonly enableProgressTracking: boolean;
+}
+
+export interface BatchProgress {
+  readonly batchId: string;
+  readonly totalItems: number;
+  readonly processedItems: number;
+  readonly acceptedItems: number;
+  readonly rejectedItems: number;
+  readonly duplicateItems: number;
+  readonly errors: readonly string[];
+  readonly isComplete: boolean;
+}
+
+export interface BatchSummary {
+  readonly batchId: string;
+  readonly progress: BatchProgress;
+  readonly scoresBefore: Readonly<Record<LeadId, number>>;
+  readonly scoresAfter: Readonly<Record<LeadId, number>>;
+  readonly qualificationChanges: readonly { readonly leadId: LeadId; readonly from: QualificationState; readonly to: QualificationState }[];
+  readonly segmentChanges: readonly { readonly leadId: LeadId; readonly from: string; readonly to: string }[];
+}
