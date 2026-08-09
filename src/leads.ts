@@ -1,4 +1,4 @@
-import type { CreateLeadInput, EngineState, Lead, LifecycleState, Outcome, Timestamp, DomainEvent } from "./contracts.js";
+import type { CreateLeadInput, EngineState, Lead, LifecycleState, Outcome, Timestamp } from "./contracts.js";
 import { failure, success, validEmail, validId, validTimestamp, validateAttributes } from "./validation.js";
 
 const transitions: Readonly<Record<LifecycleState, readonly LifecycleState[]>> = {

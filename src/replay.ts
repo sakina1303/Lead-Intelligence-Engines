@@ -58,5 +58,5 @@ export function replayLeadScoring(state: EngineState, leadId: string, rules: rea
     };
   }
 
-  return success({ state: next, history: next.scoreHistory[leadId] ?? [], impactAnalysis });
+  return success<ReplayResult>({ state: next, history: next.scoreHistory[leadId] ?? [], ...(impactAnalysis ? { impactAnalysis } : {}) });
 }

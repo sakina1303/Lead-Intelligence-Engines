@@ -1,5 +1,4 @@
-import type { CreateEventInput, EngineState, EventProcessResult, ScoringRule, Timestamp, DomainEvent } from "./contracts.js";
-import { compareEvents } from "./events.js";
+import type { CreateEventInput, EngineState, EventProcessResult, ScoringRule, Timestamp } from "./contracts.js";
 import { processEvent } from "./engine.js";
 
 export interface BatchResult {
@@ -27,12 +26,13 @@ export function processBatch(state: EngineState, inputs: readonly CreateEventInp
   const seenEventIds = new Set<string>();
 
   for (const input of sortedInputs) {
-    if (config?.enableConflictResolution && (next.events[input.id] || seenEventIds.has(input.id))) {
-      input.id = `${input.id}-resolved`;
+    let eventInput = input;
+    if (config?.enableConflictResolution && (next.events[eventInput.id] || seenEventIds.has(eventInput.id))) {
+      eventInput = { ...eventInput, id: `${eventInput.id}-resolved` };
     }
     
-    seenEventIds.add(input.id);
-    const result = processEvent(next, input, rules, evaluatedAt);
+    seenEventIds.add(eventInput.id);
+    const result = processEvent(next, eventInput, rules, evaluatedAt);
     
     if (config?.abortOnFailure && (!result.outcome || result.outcome !== "accepted" && result.outcome !== "duplicate")) {
       return { state, results: [] };
