@@ -184,3 +184,31 @@ export class EngineConfigBuilder {
     return result.value;
   }
 }
+
+// --- Extended Config Profiles ---
+
+export const defaultSaaSEngineConfig = new EngineConfigBuilder()
+  .withScoreLimits(0, 1000)
+  .withConflictMode("stack")
+  .addQualificationPolicy({
+    id: "qual-mql",
+    qualification: "marketing-qualified",
+    minimumScore: 100,
+    requiredEventTypes: ["signup"]
+  })
+  .addQualificationPolicy({
+    id: "qual-sql",
+    qualification: "sales-qualified",
+    minimumScore: 300,
+    requiredEventTypes: ["demo_request"]
+  })
+  .withSegmentFallback("unsegmented")
+  .addSegmentRule({
+    id: "seg-enterprise",
+    name: "Enterprise",
+    priority: 100,
+    minimumScore: 50,
+    requiredAttributes: { company_size: "1000+" }
+  })
+  .buildUnsafe();
+
