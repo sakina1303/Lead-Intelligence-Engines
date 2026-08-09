@@ -96,7 +96,7 @@ export function kMeansClustering(state: EngineState, config: ClusteringConfig = 
         const c = assignments.get(v.id)!;
         clusterCounts[c]++;
         for (const d of dimensions) {
-          newCentroids[c]![d] += v.vec[d] ?? 0;
+          newCentroids[c]![d] = (newCentroids[c]![d] ?? 0) + (v.vec[d] ?? 0);
         }
       }
       
