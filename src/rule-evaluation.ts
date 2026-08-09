@@ -536,3 +536,410 @@ export function analyzeRuleCoverage(state: EngineState, rules: readonly ScoringR
     ruleMatchCounts: matchCounts,
   };
 }
+
+// --- Probabilistic Rule Matching ---
+
+export interface ProbabilisticRule extends ScoringRule {
+  readonly matchProbabilityThreshold?: number; // e.g. 0.8 means 80% certainty required
+  readonly requiredConfidence?: number;
+}
+
+export interface ProbabilisticMatchResult {
+  readonly ruleId: string;
+  readonly probability: number;
+  readonly confidence: number;
+  readonly matched: boolean;
+}
+
+export function evaluateProbabilisticRule(
+  rule: ProbabilisticRule,
+  event: DomainEvent,
+  lead: Lead,
+  contextFeatures: Readonly<Record<string, number>>
+): ProbabilisticMatchResult {
+  if (!rule.enabled) return { ruleId: rule.id, probability: 0, confidence: 1, matched: false };
+  
+  // Basic boolean matching provides 1.0 or 0.0 probability
+  const booleanMatch = ruleMatches(rule, event, lead);
+  let baseProbability = booleanMatch ? 1.0 : 0.0;
+  let baseConfidence = 1.0;
+  
+  // If rule has expressions that aren't strictly boolean, we could map them to a probability
+  // For this deterministic implementation, we simulate probabilistic matching using feature weights.
+  if (rule.condition.attributes) {
+    let matchedAttrCount = 0;
+    const totalAttrs = Object.keys(rule.condition.attributes).length;
+    
+    if (totalAttrs > 0) {
+      for (const [key, val] of Object.entries(rule.condition.attributes)) {
+        if (event.attributes[key] === val) matchedAttrCount++;
+      }
+      
+      const attrMatchRatio = matchedAttrCount / totalAttrs;
+      
+      // Combine boolean structural match with attribute fuzzy match
+      if (!booleanMatch && attrMatchRatio > 0) {
+        // e.g., if event type matches but only 50% of attributes match
+        const typeMatches = rule.condition.eventType === undefined || rule.condition.eventType === event.type;
+        if (typeMatches) {
+          baseProbability = attrMatchRatio;
+          baseConfidence = 0.8;
+        }
+      }
+    }
+  }
+  
+  // Apply context features if available
+  if (contextFeatures['time_of_day_weight'] !== undefined && baseProbability > 0) {
+    baseProbability *= contextFeatures['time_of_day_weight'];
+    baseConfidence *= 0.9;
+  }
+  
+  const threshold = rule.matchProbabilityThreshold ?? 0.5;
+  const reqConfidence = rule.requiredConfidence ?? 0.0;
+  
+  return {
+    ruleId: rule.id,
+    probability: baseProbability,
+    confidence: baseConfidence,
+    matched: baseProbability >= threshold && baseConfidence >= reqConfidence
+  };
+}
+
+export function findProbabilisticMatches(
+  rules: readonly ProbabilisticRule[],
+  event: DomainEvent,
+  lead: Lead,
+  contextFeatures: Readonly<Record<string, number>>
+): readonly ProbabilisticMatchResult[] {
+  return rules
+    .map(r => evaluateProbabilisticRule(r, event, lead, contextFeatures))
+    .filter(res => res.matched)
+    .sort((a, b) => b.probability - a.probability);
+}
+
+// --- Rule Conflict Resolution ---
+
+export interface RuleConflict {
+  readonly ruleIdA: string;
+  readonly ruleIdB: string;
+  readonly conflictType: "mutation" | "overlapping_condition" | "opposing_outcomes";
+  readonly severity: number;
+}
+
+export function detectRuleConflicts(rules: readonly ScoringRule[]): readonly RuleConflict[] {
+  const conflicts: RuleConflict[] = [];
+  
+  for (let i = 0; i < rules.length; i++) {
+    for (let j = i + 1; j < rules.length; j++) {
+      const a = rules[i]!;
+      const b = rules[j]!;
+      
+      // Opposing outcomes: same condition, but one adds points and the other subtracts
+      if (a.condition.eventType === b.condition.eventType && 
+          a.condition.category === b.condition.category) {
+        
+        const aAttrs = JSON.stringify(a.condition.attributes ?? {});
+        const bAttrs = JSON.stringify(b.condition.attributes ?? {});
+        
+        if (aAttrs === bAttrs) {
+          if (Math.sign(a.points) !== Math.sign(b.points) && a.points !== 0 && b.points !== 0) {
+            conflicts.push({
+              ruleIdA: a.id,
+              ruleIdB: b.id,
+              conflictType: "opposing_outcomes",
+              severity: 1.0 // Maximum severity
+            });
+          } else if (a.points === b.points && a.priority === b.priority) {
+            conflicts.push({
+              ruleIdA: a.id,
+              ruleIdB: b.id,
+              conflictType: "overlapping_condition",
+              severity: 0.5
+            });
+          }
+        }
+      }
+    }
+  }
+  
+  return conflicts;
+}
+
+export function resolveRuleConflicts(rules: readonly ScoringRule[], conflicts: readonly RuleConflict[]): readonly ScoringRule[] {
+  // Simple deterministic resolution: disable lower-priority rules in conflicts
+  const rulesToDisable = new Set<string>();
+  
+  for (const conflict of conflicts) {
+    if (conflict.conflictType === "opposing_outcomes" || conflict.conflictType === "overlapping_condition") {
+      const ruleA = rules.find(r => r.id === conflict.ruleIdA);
+      const ruleB = rules.find(r => r.id === conflict.ruleIdB);
+      
+      if (ruleA && ruleB) {
+        if (ruleA.priority > ruleB.priority) {
+          rulesToDisable.add(ruleB.id);
+        } else if (ruleB.priority > ruleA.priority) {
+          rulesToDisable.add(ruleA.id);
+        } else {
+          // Tie-breaker: disable rule with ID that comes last alphabetically
+          if (ruleA.id.localeCompare(ruleB.id) < 0) {
+            rulesToDisable.add(ruleB.id);
+          } else {
+            rulesToDisable.add(ruleA.id);
+          }
+        }
+      }
+    }
+  }
+  
+  return rules.map(rule => {
+    if (rulesToDisable.has(rule.id)) {
+      return { ...rule, enabled: false };
+    }
+    return rule;
+  });
+}
+
+// --- Rule Inference Engine (Deterministic) ---
+
+export interface RuleInferenceParams {
+  readonly minSupport: number; // Minimum number of occurrences to infer a rule
+  readonly minConfidence: number; // Minimum conversion rate associated with the pattern
+  readonly maxRulesToInfer: number;
+}
+
+export interface InferredRule {
+  readonly suggestedRule: ScoringRule;
+  readonly support: number;
+  readonly confidence: number;
+  readonly lift: number;
+}
+
+export function inferScoringRules(
+  state: EngineState,
+  convertedLeadIds: readonly string[],
+  params: RuleInferenceParams
+): readonly InferredRule[] {
+  
+  // Apriori-like pattern mining on event types
+  const eventCountsByLead: Record<string, Set<string>> = {}; // leadId -> set of event types
+  
+  for (const event of Object.values(state.events)) {
+    if (!eventCountsByLead[event.leadId]) {
+      eventCountsByLead[event.leadId] = new Set();
+    }
+    eventCountsByLead[event.leadId]!.add(event.type);
+  }
+  
+  // Count global frequencies
+  const globalFreq: Record<string, number> = {};
+  for (const [leadId, types] of Object.entries(eventCountsByLead)) {
+    for (const type of types) {
+      globalFreq[type] = (globalFreq[type] ?? 0) + 1;
+    }
+  }
+  
+  // Count frequencies among converted leads
+  const convertedFreq: Record<string, number> = {};
+  for (const leadId of convertedLeadIds) {
+    const types = eventCountsByLead[leadId];
+    if (types) {
+      for (const type of types) {
+        convertedFreq[type] = (convertedFreq[type] ?? 0) + 1;
+      }
+    }
+  }
+  
+  const totalLeads = Object.keys(state.leads).length;
+  const totalConverted = convertedLeadIds.length;
+  const baseConversionRate = totalConverted / Math.max(1, totalLeads);
+  
+  const inferredRules: InferredRule[] = [];
+  
+  for (const [type, convCount] of Object.entries(convertedFreq)) {
+    if (convCount < params.minSupport) continue;
+    
+    const globalCount = globalFreq[type] ?? 0;
+    const confidence = convCount / Math.max(1, globalCount);
+    
+    if (confidence >= params.minConfidence) {
+      const lift = baseConversionRate === 0 ? 0 : confidence / baseConversionRate;
+      
+      // Determine suggested points based on lift
+      const suggestedPoints = Math.round((lift - 1) * 10);
+      
+      if (suggestedPoints > 0) {
+        const suggestedRule: ScoringRule = {
+          id: `inferred_rule_${type.replace(/[^a-zA-Z0-9]/g, '_')}`,
+          name: `Inferred: High Conversion on ${type}`,
+          description: `Automatically inferred rule for event type ${type}`,
+          enabled: true,
+          priority: 50,
+          points: Math.min(100, suggestedPoints),
+          condition: {
+            eventType: type
+          }
+        };
+        
+        inferredRules.push({
+          suggestedRule,
+          support: convCount,
+          confidence,
+          lift
+        });
+      }
+    }
+  }
+  
+  return inferredRules
+    .sort((a, b) => b.lift - a.lift || b.support - a.support)
+    .slice(0, params.maxRulesToInfer);
+}
+
+// --- Rule Chain Impact Simulation ---
+
+export interface RuleSimulationResult {
+  readonly ruleId: string;
+  readonly triggersCount: number;
+  readonly uniqueLeadsImpacted: number;
+  readonly totalPointsContributed: number;
+}
+
+export function simulateRuleImpact(
+  rules: readonly ScoringRule[],
+  events: readonly DomainEvent[],
+  leads: Readonly<Record<string, Lead>>
+): readonly RuleSimulationResult[] {
+  
+  const results: Record<string, { triggers: number, leads: Set<string>, points: number }> = {};
+  for (const rule of rules) {
+    results[rule.id] = { triggers: 0, leads: new Set(), points: 0 };
+  }
+  
+  for (const event of events) {
+    const lead = leads[event.leadId];
+    if (!lead) continue;
+    
+    const matched = matchingRules(rules, event, lead);
+    
+    for (const rule of matched) {
+      const res = results[rule.id]!;
+      res.triggers++;
+      res.leads.add(lead.id);
+      res.points += rule.points;
+    }
+  }
+  
+  return rules.map(rule => ({
+    ruleId: rule.id,
+    triggersCount: results[rule.id]!.triggers,
+    uniqueLeadsImpacted: results[rule.id]!.leads.size,
+    totalPointsContributed: results[rule.id]!.points
+  }));
+}
+
+// --- Rule Clustering and Similarity ---
+
+export interface RuleCluster {
+  readonly id: string;
+  readonly ruleIds: readonly string[];
+  readonly centroidFeatures: Readonly<Record<string, number>>;
+}
+
+export function clusterRules(rules: readonly ScoringRule[], k: number): readonly RuleCluster[] {
+  if (rules.length === 0) return [];
+  if (k >= rules.length) {
+    return rules.map((r, i) => ({ id: `cluster_${i}`, ruleIds: [r.id], centroidFeatures: {} }));
+  }
+  
+  // Extract simple feature vectors
+  const ruleFeatures = rules.map(r => {
+    return {
+      rule: r,
+      features: {
+        points: r.points,
+        priority: r.priority,
+        hasEventType: r.condition.eventType ? 1 : 0,
+        hasCategory: r.condition.category ? 1 : 0,
+        hasAttributes: r.condition.attributes ? Object.keys(r.condition.attributes).length : 0
+      } as Record<string, number>
+    };
+  });
+  
+  // Basic deterministic K-means for rules
+  let centroids = ruleFeatures.slice(0, k).map(rf => ({ ...rf.features }));
+  let assignments = new Array(rules.length).fill(0);
+  
+  const maxIters = 10;
+  for (let iter = 0; iter < maxIters; iter++) {
+    // Assign to nearest centroid
+    let changed = false;
+    for (let i = 0; i < ruleFeatures.length; i++) {
+      const rf = ruleFeatures[i]!.features;
+      let bestDist = Infinity;
+      let bestC = 0;
+      
+      for (let c = 0; c < k; c++) {
+        let dist = 0;
+        const cent = centroids[c]!;
+        for (const [key, val] of Object.entries(rf)) {
+          dist += Math.pow(val - (cent[key] ?? 0), 2);
+        }
+        
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestC = c;
+        }
+      }
+      
+      if (assignments[i] !== bestC) {
+        assignments[i] = bestC;
+        changed = true;
+      }
+    }
+    
+    if (!changed) break;
+    
+    // Update centroids
+    const newCentroids = new Array(k).fill(null).map(() => ({} as Record<string, number>));
+    const counts = new Array(k).fill(0);
+    
+    for (let i = 0; i < ruleFeatures.length; i++) {
+      const c = assignments[i];
+      counts[c]++;
+      for (const [key, val] of Object.entries(ruleFeatures[i]!.features)) {
+        newCentroids[c]![key] = (newCentroids[c]![key] ?? 0) + val;
+      }
+    }
+    
+    for (let c = 0; c < k; c++) {
+      if (counts[c] > 0) {
+        for (const key of Object.keys(newCentroids[c]!)) {
+          newCentroids[c]![key] /= counts[c];
+        }
+      }
+    }
+    
+    centroids = newCentroids;
+  }
+  
+  const clusters: RuleCluster[] = [];
+  for (let c = 0; c < k; c++) {
+    const ids: string[] = [];
+    for (let i = 0; i < assignments.length; i++) {
+      if (assignments[i] === c) {
+        ids.push(rules[i]!.id);
+      }
+    }
+    
+    if (ids.length > 0) {
+      clusters.push({
+        id: `cluster_${c}`,
+        ruleIds: ids.sort(),
+        centroidFeatures: centroids[c]!
+      });
+    }
+  }
+  
+  return clusters;
+}
