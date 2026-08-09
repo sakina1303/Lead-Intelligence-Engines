@@ -1,4 +1,4 @@
-import type { DomainEvent, EngineState, EventCategory, LifecycleState, QualificationState, AnalyticsSummary } from "./contracts.js";
+import type { DomainEvent, EngineState, EventCategory, LifecycleState, QualificationState, AnalyticsSummary, Lead } from "./contracts.js";
 
 const lifecycles: readonly LifecycleState[] = ["new", "contacted", "nurturing", "qualified", "converted", "rejected"];
 const qualifications: readonly QualificationState[] = ["unqualified", "marketing-qualified", "sales-qualified", "disqualified"];
