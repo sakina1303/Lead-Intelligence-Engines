@@ -525,7 +525,7 @@ export function applyCapacityRouting(
   return {
     finalResult: {
       ...initialResult,
-      state: currentState,
+      state: currentState as any,
       reasons: overflowTriggered 
         ? [...initialResult.reasons, `Capacity overflowed from ${originalState}`] 
         : initialResult.reasons
