@@ -952,7 +952,7 @@ export interface PropensityModel {
 }
 
 export function calculateBuyPropensity(
-  lead: Lead,
+  _lead: Lead,
   events: readonly DomainEvent[],
   model: PropensityModel
 ): number {
