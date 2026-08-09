@@ -15,4 +15,4 @@ export { assignSegment } from "./segmentation.js";
 export { rankLeads } from "./ranking.js";
 export * from "./machine-learning.js";
 export { summarize } from "./analytics.js";
-export { replayLeadScoring } from "./replay.js";
+export { evaluateWhatIfScenario, replayLeadScoring, runShadowPolicyExecution } from "./replay.js";

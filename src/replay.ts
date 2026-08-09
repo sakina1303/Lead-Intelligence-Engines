@@ -77,6 +77,7 @@ export function runShadowPolicyExecution(
   leadId: string,
   shadowRules: readonly ScoringRule[],
   shadowQualificationPolicies: readonly import("./contracts.js").QualificationPolicy[],
+  evaluatedAt: number,
   shadowConfig?: { cap?: number; floor?: number }
 ): Outcome<ShadowExecutionResult> {
   
@@ -111,7 +112,7 @@ export function runShadowPolicyExecution(
       scores: { ...shadowState.scores, [leadId]: shadowScore },
       qualifications: { 
         ...shadowState.qualifications, 
-        [leadId]: { leadId, policyId: "shadow", state: shadowQualState as any, evaluatedAt: Date.now(), reasons: [] } 
+        [leadId]: { leadId, policyId: "shadow", state: shadowQualState as import("./contracts.js").QualificationState, evaluatedAt, reasons: ["evaluated against supplied shadow policy"] } 
       }
     },
     baseScore,
@@ -341,40 +342,39 @@ export function evaluateWhatIfScenario(
     }
   }
   
-  // 2. Build modified event stream
+  // 2. Build a complete, ordered event stream for this lead. Scenario events
+  // are already domain events, so no synthetic identifiers or categories are
+  // invented here.
   const currentEvents = getLeadEvents(state, leadId);
   const dropSet = new Set(scenario.eventsToDrop);
-  
   const keptEvents = currentEvents.filter(e => !dropSet.has(e.id));
-  
-  // Create dummy event objects for injection
-  const injectedEvents = scenario.eventsToInject.map((input, idx) => ({
-    id: input.id ?? `injected_${scenario.id}_${idx}`,
-    leadId,
-    type: input.type,
-    category: input.category ?? "system",
-    attributes: input.attributes ?? {},
-    occurredAt: input.occurredAt
-  } as import("./contracts.js").DomainEvent));
-  
-  const allEvents = [...keptEvents, ...injectedEvents].sort((a, b) => a.occurredAt - b.occurredAt);
-  
-  // 3. Replay from scratch
-  let mockState: EngineState = {
+  const injectedEvents = scenario.eventsToInject;
+  for (const injected of injectedEvents) {
+    if (injected.leadId !== leadId) return failure(`injected event '${injected.id}' belongs to '${injected.leadId}', not '${leadId}'`);
+    if (state.events[injected.id] && !dropSet.has(injected.id)) return failure(`injected event '${injected.id}' conflicts with an existing ledger event`);
+  }
+  const allEvents = [...keptEvents, ...injectedEvents].sort((a, b) => a.occurredAt - b.occurredAt || a.sequence - b.sequence || a.id.localeCompare(b.id));
+  if (new Set(allEvents.map((event) => event.id)).size !== allEvents.length) return failure("scenario produces duplicate event identifiers");
+
+  const scenarioEvents = { ...state.events } as Record<string, import("./contracts.js").DomainEvent>;
+  for (const event of currentEvents) delete scenarioEvents[event.id];
+  for (const event of allEvents) scenarioEvents[event.id] = event;
+  const scenarioIndex = { ...state.eventIdsByLead, [leadId]: allEvents.map((event) => event.id) };
+  let scenarioState: EngineState = {
     ...state,
     scores: { ...state.scores, [leadId]: 0 },
     scoreHistory: { ...state.scoreHistory, [leadId]: [] },
     scoreProjections: { ...state.scoreProjections, [leadId]: { leadId, total: 0, dimensions: {}, updatedAt: 0 } },
-    events: {} // Not fully populated, just enough for scoreEvent if needed
+    events: scenarioEvents,
+    eventIdsByLead: scenarioIndex
   };
   
   for (const event of allEvents) {
-    mockState = { ...mockState, events: { ...mockState.events, [event.id]: event } };
-    const res = scoreEvent(mockState, event, modifiedRules);
-    mockState = res.state;
+    const res = scoreEvent(scenarioState, event, modifiedRules);
+    scenarioState = res.state;
   }
   
-  const projectedScore = mockState.scores[leadId] ?? 0;
+  const projectedScore = scenarioState.scores[leadId] ?? 0;
   
   // 4. Qualification
   let projectedQualification = "unqualified";
