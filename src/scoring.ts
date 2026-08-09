@@ -672,6 +672,7 @@ export interface DynamicThresholds {
 export function calibrateThresholds(
   state: EngineState, 
   method: "percentile" | "kmeans" | "stddev",
+  evaluatedAt: number,
   targetMQLPercentile: number = 75,
   targetSQLPercentile: number = 90
 ): DynamicThresholds {
@@ -679,7 +680,7 @@ export function calibrateThresholds(
   
   if (scores.length < 10) {
     // Fallback to static defaults if not enough data
-    return { marketingQualifiedThreshold: 50, salesQualifiedThreshold: 80, lastCalibratedAt: Date.now(), calibrationMethod: method };
+    return { marketingQualifiedThreshold: 50, salesQualifiedThreshold: 80, lastCalibratedAt: evaluatedAt, calibrationMethod: method };
   }
   
   const sorted = [...scores].sort((a, b) => a - b);
@@ -747,7 +748,7 @@ export function calibrateThresholds(
   return {
     marketingQualifiedThreshold: Math.max(1, mql),
     salesQualifiedThreshold: Math.max(mql + 1, sql),
-    lastCalibratedAt: Date.now(),
+    lastCalibratedAt: evaluatedAt,
     calibrationMethod: method
   };
 }
