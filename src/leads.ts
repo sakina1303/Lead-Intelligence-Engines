@@ -305,7 +305,7 @@ export function buildLeadAssociations(state: EngineState): readonly LeadAssociat
     }
   }
   
-  for (const [domain, domainLeads] of Object.entries(domainGroups)) {
+  for (const [_, domainLeads] of Object.entries(domainGroups)) {
     for (let i = 0; i < domainLeads.length; i++) {
       for (let j = i + 1; j < domainLeads.length; j++) {
         associations.push({
