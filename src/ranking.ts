@@ -198,3 +198,138 @@ export function generateSyntheticMatchupsFromScoreProjections(state: EngineState
   
   return matchups;
 }
+
+// --- PageRank for Lead Associations ---
+
+export interface AssociationLink {
+  readonly fromLeadId: string;
+  readonly toLeadId: string;
+  readonly strength: number; // 0.0 to 1.0
+}
+
+export function computeLeadPageRank(
+  leads: readonly Lead[],
+  links: readonly AssociationLink[],
+  iterations: number = 20,
+  dampingFactor: number = 0.85
+): Readonly<Record<string, number>> {
+  if (leads.length === 0) return {};
+  
+  const ranks: Record<string, number> = {};
+  const initialRank = 1.0 / leads.length;
+  
+  for (const lead of leads) {
+    ranks[lead.id] = initialRank;
+  }
+  
+  // Calculate out-degree weights (sum of outgoing link strengths)
+  const outWeights: Record<string, number> = {};
+  for (const lead of leads) {
+    outWeights[lead.id] = 0;
+  }
+  for (const link of links) {
+    if (outWeights[link.fromLeadId] !== undefined) {
+      outWeights[link.fromLeadId]! += link.strength;
+    }
+  }
+  
+  // Iterate
+  for (let iter = 0; iter < iterations; iter++) {
+    const newRanks: Record<string, number> = {};
+    const jumpProb = (1 - dampingFactor) / leads.length;
+    
+    // Base jump probability
+    for (const lead of leads) {
+      newRanks[lead.id] = jumpProb;
+    }
+    
+    // Distribute rank
+    for (const link of links) {
+      if (ranks[link.fromLeadId] !== undefined && newRanks[link.toLeadId] !== undefined) {
+        const outW = outWeights[link.fromLeadId];
+        if (outW && outW > 0) {
+          const proportion = link.strength / outW;
+          newRanks[link.toLeadId]! += dampingFactor * ranks[link.fromLeadId]! * proportion;
+        }
+      }
+    }
+    
+    // Handle dangling nodes (no outgoing links)
+    let danglingRank = 0;
+    for (const lead of leads) {
+      if ((outWeights[lead.id] ?? 0) === 0) {
+        danglingRank += dampingFactor * (ranks[lead.id] ?? 0) / leads.length;
+      }
+    }
+    
+    if (danglingRank > 0) {
+      for (const lead of leads) {
+        newRanks[lead.id]! += danglingRank;
+      }
+    }
+    
+    for (const lead of leads) {
+      ranks[lead.id] = newRanks[lead.id]!;
+    }
+  }
+  
+  return ranks;
+}
+
+// --- Temporal Rank Decay Models ---
+
+export interface RankDecayConfig {
+  readonly halfLifeMs: number;
+  readonly baseScoreRetention: number; // minimum score ratio retained
+}
+
+export function applyRankDecay(
+  currentRankScore: number,
+  timeSinceLastEventMs: number,
+  config: RankDecayConfig
+): number {
+  if (timeSinceLastEventMs <= 0) return currentRankScore;
+  
+  const decayFactor = Math.pow(0.5, timeSinceLastEventMs / config.halfLifeMs);
+  const minScore = currentRankScore * config.baseScoreRetention;
+  
+  return Math.max(minScore, currentRankScore * decayFactor);
+}
+
+// --- Advanced Tie-Breakers ---
+
+export interface TieBreakerContext {
+  readonly leadAId: string;
+  readonly leadBId: string;
+  readonly scoreA: number;
+  readonly scoreB: number;
+  readonly recencyA: number;
+  readonly recencyB: number;
+  readonly eventCountA: number;
+  readonly eventCountB: number;
+}
+
+export type TieBreakerStrategy = (ctx: TieBreakerContext) => number;
+
+export const strategies: Record<string, TieBreakerStrategy> = {
+  "recency_first": (ctx) => ctx.recencyB - ctx.recencyA,
+  "engagement_first": (ctx) => ctx.eventCountB - ctx.eventCountA,
+  "lexical": (ctx) => ctx.leadAId.localeCompare(ctx.leadBId)
+};
+
+export function resolveRankTie(ctx: TieBreakerContext, strategyChain: readonly string[]): number {
+  if (ctx.scoreA !== ctx.scoreB) {
+    return ctx.scoreB - ctx.scoreA;
+  }
+  
+  for (const s of strategyChain) {
+    const strategy = strategies[s];
+    if (strategy) {
+      const res = strategy(ctx);
+      if (res !== 0) return res;
+    }
+  }
+  
+  // Ultimate fallback
+  return ctx.leadAId.localeCompare(ctx.leadBId);
+}
