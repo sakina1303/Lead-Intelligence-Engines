@@ -444,3 +444,292 @@ export function evaluateDependentQualification(
   return evaluateQualification(lead, score, events, policy, evaluatedAt);
 }
 
+// --- Qualification Matrix Evaluation ---
+
+export interface MatrixDimensionDef {
+  readonly id: string;
+  readonly attribute: string; // From lead attributes
+  readonly scoreWeights: Readonly<Record<string, number>>; // attribute value -> weight
+}
+
+export interface QualificationMatrix {
+  readonly id: string;
+  readonly dimensions: readonly MatrixDimensionDef[];
+  readonly requiredMatrixScore: number;
+}
+
+export function evaluateQualificationMatrix(
+  lead: Lead,
+  matrix: QualificationMatrix
+): { readonly isQualified: boolean; readonly matrixScore: number; readonly missingAttributes: readonly string[] } {
+  let score = 0;
+  const missing: string[] = [];
+  
+  for (const dim of matrix.dimensions) {
+    const val = lead.attributes[dim.attribute];
+    if (val === undefined || val === null) {
+      missing.push(dim.attribute);
+    } else {
+      const weight = dim.scoreWeights[String(val)] ?? 0;
+      score += weight;
+    }
+  }
+  
+  return {
+    isQualified: score >= matrix.requiredMatrixScore,
+    matrixScore: score,
+    missingAttributes: missing
+  };
+}
+
+// --- Capacity-Aware Qualification Routing ---
+
+export interface QualificationCapacityNode {
+  readonly state: string;
+  readonly maxCapacity: number;
+  readonly currentLoad: number;
+  readonly overflowState?: string;
+}
+
+export function applyCapacityRouting(
+  initialResult: QualificationResult,
+  capacities: readonly QualificationCapacityNode[]
+): { readonly finalResult: QualificationResult; readonly overflowTriggered: boolean; readonly originalState: string } {
+  const originalState = initialResult.state;
+  let currentState = originalState;
+  let overflowTriggered = false;
+  
+  // Follow overflow chain
+  let iters = 0;
+  while (iters < 10) { // arbitrary limit to prevent infinite loops
+    const node = capacities.find(c => c.state === currentState);
+    if (!node) break;
+    
+    if (node.currentLoad >= node.maxCapacity) {
+      if (node.overflowState) {
+        currentState = node.overflowState;
+        overflowTriggered = true;
+      } else {
+        // If no overflow defined but at capacity, fail qualification
+        currentState = "unqualified";
+        overflowTriggered = true;
+        break;
+      }
+    } else {
+      // Capacity available
+      break;
+    }
+    iters++;
+  }
+  
+  return {
+    finalResult: {
+      ...initialResult,
+      state: currentState,
+      reasons: overflowTriggered 
+        ? [...initialResult.reasons, `Capacity overflowed from ${originalState}`] 
+        : initialResult.reasons
+    },
+    overflowTriggered,
+    originalState
+  };
+}
+
+// --- Qualification Degradation Modeling ---
+
+export interface DegradationModel {
+  readonly state: string;
+  readonly halflifeMs: number;
+  readonly minScoreToRetainState: number;
+}
+
+export function evaluateQualificationDegradation(
+  currentScore: number,
+  timeSinceLastEventMs: number,
+  context: QualificationStateContext,
+  model: DegradationModel
+): { readonly retained: boolean; readonly degradedScore: number } {
+  
+  if (context.currentState !== model.state) {
+    return { retained: true, degradedScore: currentScore };
+  }
+  
+  const degradedScore = currentScore * Math.pow(0.5, timeSinceLastEventMs / model.halflifeMs);
+  
+  return {
+    retained: degradedScore >= model.minScoreToRetainState,
+    degradedScore
+  };
+}
+
+// --- Heuristic Qualification Prediction ---
+
+export interface QualificationHeuristics {
+  readonly highIntentEventTypes: readonly string[];
+  readonly velocityThresholdEventsPerDay: number;
+  readonly targetLifecycleStages: readonly string[];
+}
+
+export interface PredictionResult {
+  readonly probability: number; // 0.0 to 1.0
+  readonly confidence: number;  // 0.0 to 1.0
+  readonly keyFactors: readonly string[];
+}
+
+export function predictFutureQualification(
+  lead: Lead,
+  events: readonly DomainEvent[],
+  heuristics: QualificationHeuristics,
+  evaluatedAt: Timestamp
+): PredictionResult {
+  let p = 0.1; // base probability
+  let c = 0.5; // base confidence (low without data)
+  const factors: string[] = [];
+  
+  if (events.length === 0) {
+    return { probability: p, confidence: 0.1, keyFactors: ["No events"] };
+  }
+  
+  // 1. High intent events
+  const intentEvents = events.filter(e => heuristics.highIntentEventTypes.includes(e.type));
+  if (intentEvents.length > 0) {
+    p += 0.3 * Math.min(1, intentEvents.length / 3);
+    c += 0.2;
+    factors.push(`Found ${intentEvents.length} high-intent events`);
+  }
+  
+  // 2. Velocity
+  const firstEventTime = Math.min(...events.map(e => e.occurredAt));
+  const timeSpanDays = Math.max(0.1, (evaluatedAt - firstEventTime) / (1000 * 60 * 60 * 24));
+  const velocity = events.length / timeSpanDays;
+  
+  if (velocity >= heuristics.velocityThresholdEventsPerDay) {
+    p += 0.2;
+    c += 0.1;
+    factors.push(`High velocity: ${velocity.toFixed(1)} events/day`);
+  } else if (velocity < heuristics.velocityThresholdEventsPerDay * 0.1) {
+    p -= 0.1;
+    factors.push(`Low velocity: ${velocity.toFixed(1)} events/day`);
+  }
+  
+  // 3. Lifecycle mapping
+  if (heuristics.targetLifecycleStages.includes(lead.lifecycle)) {
+    p += 0.2;
+    c += 0.1;
+    factors.push(`Target lifecycle: ${lead.lifecycle}`);
+  }
+  
+  // 4. Attribute completeness
+  const attrKeys = Object.keys(lead.attributes);
+  if (attrKeys.length > 5) {
+    p += 0.1;
+    c += 0.1;
+  }
+  
+  return {
+    probability: Math.max(0, Math.min(1, p)),
+    confidence: Math.max(0, Math.min(1, c)),
+    keyFactors: factors
+  };
+}
+
+// --- Qualification Confidence Scoring ---
+
+export interface ConfidenceMetrics {
+  readonly dataCompletenessScore: number;
+  readonly eventDiversityScore: number;
+  readonly scoreStabilityScore: number;
+  readonly overallConfidence: number; // 0-100
+}
+
+export function computeQualificationConfidence(
+  lead: Lead,
+  events: readonly DomainEvent[],
+  scoreHistory: readonly number[]
+): ConfidenceMetrics {
+  
+  // 1. Completeness
+  const expectedKeys = ['email', 'company', 'role', 'industry', 'country'];
+  let foundKeys = 0;
+  for (const k of expectedKeys) {
+    if (lead.attributes[k]) foundKeys++;
+  }
+  const dataCompletenessScore = (foundKeys / expectedKeys.length) * 100;
+  
+  // 2. Diversity
+  const categories = new Set(events.map(e => e.category));
+  const eventDiversityScore = Math.min(100, (categories.size / 4) * 100);
+  
+  // 3. Stability
+  let scoreStabilityScore = 100;
+  if (scoreHistory.length > 2) {
+    const recent = scoreHistory.slice(-5);
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    let variance = 0;
+    for (const s of recent) variance += Math.pow(s - mean, 2);
+    variance /= recent.length;
+    
+    // higher variance = lower stability
+    const penalty = Math.min(100, variance / 10); 
+    scoreStabilityScore = Math.max(0, 100 - penalty);
+  }
+  
+  const overallConfidence = (dataCompletenessScore * 0.4) + (eventDiversityScore * 0.4) + (scoreStabilityScore * 0.2);
+  
+  return {
+    dataCompletenessScore,
+    eventDiversityScore,
+    scoreStabilityScore,
+    overallConfidence
+  };
+}
+
+// --- Multi-Dimensional SLAs ---
+
+export interface SLADimension {
+  readonly id: string;
+  readonly maxDurationMs: number;
+  readonly triggersAlert: boolean;
+}
+
+export interface MultiDimensionalSLA {
+  readonly stateId: string;
+  readonly dimensions: readonly SLADimension[];
+}
+
+export interface SLADimensionResult {
+  readonly dimensionId: string;
+  readonly isBreached: boolean;
+  readonly remainingMs: number;
+}
+
+export function evaluateMultiDimensionalSLA(
+  context: QualificationStateContext,
+  sla: MultiDimensionalSLA,
+  evaluatedAt: Timestamp
+): { readonly breachedCount: number; readonly results: readonly SLADimensionResult[] } {
+  
+  if (context.currentState !== sla.stateId) {
+    return { breachedCount: 0, results: sla.dimensions.map(d => ({ dimensionId: d.id, isBreached: false, remainingMs: d.maxDurationMs })) };
+  }
+  
+  const duration = evaluatedAt - context.enteredAt;
+  const results: SLADimensionResult[] = [];
+  let breachedCount = 0;
+  
+  for (const dim of sla.dimensions) {
+    const remaining = dim.maxDurationMs - duration;
+    const isBreached = remaining < 0;
+    
+    if (isBreached) breachedCount++;
+    
+    results.push({
+      dimensionId: dim.id,
+      isBreached,
+      remainingMs: Math.max(0, remaining)
+    });
+  }
+  
+  return { breachedCount, results };
+}
+
