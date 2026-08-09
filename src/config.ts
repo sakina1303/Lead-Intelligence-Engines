@@ -125,10 +125,11 @@ export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
     if (Array.isArray(v1Config?.thresholds)) {
       for (const t of v1Config.thresholds) {
         if (typeof t.name === "string" && typeof t.value === "number") {
-          config.qualificationPolicies.push({
+          config.qualificationPolicies = [...config.qualificationPolicies, {
             id: `qual-${t.name.toLowerCase().replace(/\s+/g, "-")}`,
+            qualification: "qualified" as import("./contracts.js").QualificationState,
             minimumScore: t.value,
-          });
+          }];
         }
       }
     }

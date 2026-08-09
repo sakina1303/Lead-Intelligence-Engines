@@ -308,6 +308,7 @@ export class RuleBuilder {
       name: this.name,
       priority: this.priority,
       delta: this.delta,
+      enabled: true,
       condition: {
         ...(this.eventType ? { eventType: this.eventType } : {}),
         ...(this.attributes.length > 0 ? { attributes: this.attributes } : {}),
