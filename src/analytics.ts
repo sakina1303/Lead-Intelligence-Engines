@@ -32,9 +32,9 @@ export function summarize(state: EngineState): AnalyticsSummary {
   return { leadCount, eventCount: Object.keys(state.events).length, totalScore, averageScore: leadCount === 0 ? 0 : totalScore / leadCount, scoresByLifecycle, leadsByQualification, leadsBySegment, eventsByCategory, eventsByType };
 }
 
-import type { AnalyticsReport, CohortDefinition, CohortMembership, CohortMetrics, CohortComparison, TrendDataPoint, TrendAnalysis, FunnelDefinition, FunnelResult, FunnelStageResult, FunnelAggregation, FunnelStageAggregation } from "./contracts.js";
+import type { AnalyticsSummary, CohortDefinition, CohortMembership, CohortMetrics, CohortComparison, TrendDataPoint, TrendAnalysis, FunnelDefinition, FunnelResult, FunnelStageResult, FunnelAggregation, FunnelStageAggregation } from "./contracts.js";
 
-export function getAnalyticsReport(state: EngineState): AnalyticsReport {
+export function getAnalyticsReport(state: EngineState): AnalyticsSummary {
   return {
     totalLeads: Object.keys(state.leads).length,
     totalEvents: Object.keys(state.events).length,
