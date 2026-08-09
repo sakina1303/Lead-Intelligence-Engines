@@ -112,14 +112,14 @@ export function mergeEngineConfigs(base: EngineConfig, override: Partial<EngineC
 
 export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
   try {
-    const config: EngineConfig = {
+    const config = {
       scorePolicy: {
         cap: typeof v1Config?.maxScore === "number" ? v1Config.maxScore : 1000,
         floor: typeof v1Config?.minScore === "number" ? v1Config.minScore : 0,
-        conflictMode: "stack",
+        conflictMode: "stack" as const,
       },
-      qualificationPolicies: [],
-      segmentPolicy: { fallback: "default", rules: [] },
+      qualificationPolicies: [] as import("./contracts.js").QualificationPolicy[],
+      segmentPolicy: { fallback: "default", rules: [] as import("./contracts.js").SegmentRule[] },
     };
     
     if (Array.isArray(v1Config?.thresholds)) {
@@ -143,10 +143,10 @@ export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
 // --- Default Builders ---
 
 export class EngineConfigBuilder {
-  private config: EngineConfig = {
-    scorePolicy: { cap: 1000, floor: 0, conflictMode: "stack" },
-    qualificationPolicies: [],
-    segmentPolicy: { fallback: "unsegmented", rules: [] },
+  private config = {
+    scorePolicy: { cap: 1000, floor: 0, conflictMode: "stack" as const },
+    qualificationPolicies: [] as import("./contracts.js").QualificationPolicy[],
+    segmentPolicy: { fallback: "unsegmented", rules: [] as import("./contracts.js").SegmentRule[] },
   };
   
   public withScoreLimits(floor: number, cap: number): this {
@@ -160,7 +160,7 @@ export class EngineConfigBuilder {
   }
   
   public addQualificationPolicy(policy: import("./contracts.js").QualificationPolicy): this {
-    this.config.qualificationPolicies.push(policy);
+    this.config.qualificationPolicies = [...this.config.qualificationPolicies, policy];
     return this;
   }
   
@@ -170,7 +170,7 @@ export class EngineConfigBuilder {
   }
   
   public addSegmentRule(rule: import("./contracts.js").SegmentRule): this {
-    this.config.segmentPolicy.rules.push(rule);
+    this.config.segmentPolicy.rules = [...this.config.segmentPolicy.rules, rule];
     return this;
   }
   

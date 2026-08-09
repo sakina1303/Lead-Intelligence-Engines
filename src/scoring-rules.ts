@@ -262,7 +262,6 @@ export function simplifyRule(rule: ScoringRule): ScoringRule {
 export class RuleBuilder {
   private id: string = "";
   private name: string = "";
-  private description: string = "";
   private priority: number = 0;
   private delta: number = 0;
   private dimensions: Record<string, number> = {};
@@ -277,7 +276,6 @@ export class RuleBuilder {
   }
   
   public withName(name: string): this { this.name = name; return this; }
-  public withDescription(desc: string): this { this.description = desc; return this; }
   public withPriority(prio: number): this { this.priority = prio; return this; }
   public withDelta(delta: number): this { this.delta = delta; return this; }
   public withDimension(dim: string, val: number): this { this.dimensions[dim] = val; return this; }
@@ -312,7 +310,6 @@ export class RuleBuilder {
     return {
       id: this.id,
       name: this.name,
-      description: this.description,
       priority: this.priority,
       delta: this.delta,
       dimensions: Object.keys(this.dimensions).length > 0 ? this.dimensions : undefined,
