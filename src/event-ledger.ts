@@ -140,3 +140,227 @@ export function countEventsByLead(state: EngineState, filter: Omit<EventQueryFil
   for (const event of queryEventLedger(state, filter)) counts[event.leadId] = (counts[event.leadId] ?? 0) + 1;
   return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
 }
+
+// --- Multi-Touch Attribution Models ---
+
+import type { AttributionModelType, AttributionResult, AttributionWeight, TouchPoint } from "./contracts.js";
+
+export function buildTouchPoints(state: EngineState, leadId: string, channelAttributeKey: string = "channel", conversionEventType: string = "conversion"): readonly TouchPoint[] {
+  const events = getLeadEvents(state, leadId);
+  
+  return events.map(event => {
+    const isConversion = event.type === conversionEventType;
+    if (isConversion) foundConversion = true;
+    return {
+      eventId: event.id,
+      leadId: event.leadId,
+      channel: typeof event.attributes[channelAttributeKey] === "string" ? event.attributes[channelAttributeKey] as string : "direct",
+      category: event.category,
+      occurredAt: event.occurredAt,
+      isConversion,
+    };
+  });
+}
+
+export function computeAttribution(touchPoints: readonly TouchPoint[], model: AttributionModelType, decayHalfLifeMs: number = 86400000 * 7): AttributionResult {
+  const leadId = touchPoints.length > 0 ? touchPoints[0]!.leadId : "";
+  const conversionPoint = touchPoints.find(tp => tp.isConversion);
+  const relevantPoints = conversionPoint 
+    ? touchPoints.filter(tp => tp.occurredAt <= conversionPoint.occurredAt)
+    : touchPoints;
+  
+  if (relevantPoints.length === 0) {
+    return { leadId, model, touchPoints: relevantPoints, weights: [], totalWeight: 0 };
+  }
+  
+  const n = relevantPoints.length;
+  let rawWeights: number[];
+  
+  switch (model) {
+    case "first-touch":
+      rawWeights = relevantPoints.map((_, i) => i === 0 ? 1 : 0);
+      break;
+    
+    case "last-touch":
+      rawWeights = relevantPoints.map((_, i) => i === n - 1 ? 1 : 0);
+      break;
+    
+    case "linear":
+      rawWeights = relevantPoints.map(() => 1 / n);
+      break;
+    
+    case "time-decay": {
+      const lastTimestamp = relevantPoints[n - 1]!.occurredAt;
+      rawWeights = relevantPoints.map(tp => {
+        const ageMs = lastTimestamp - tp.occurredAt;
+        return Math.pow(0.5, ageMs / decayHalfLifeMs);
+      });
+      break;
+    }
+    
+    case "position-based":
+      rawWeights = relevantPoints.map((_, i) => {
+        if (n === 1) return 1;
+        if (i === 0 || i === n - 1) return 0.4;
+        return 0.2 / (n - 2);
+      });
+      break;
+    
+    case "w-shaped":
+      rawWeights = relevantPoints.map((_, i) => {
+        if (n <= 3) return 1 / n;
+        const midIdx = Math.floor(n / 2);
+        if (i === 0 || i === midIdx || i === n - 1) return 0.3;
+        return 0.1 / (n - 3);
+      });
+      break;
+  }
+  
+  const totalRaw = rawWeights.reduce((sum, w) => sum + w, 0);
+  
+  const weights: AttributionWeight[] = relevantPoints.map((tp, i) => ({
+    touchPointEventId: tp.eventId,
+    weight: rawWeights[i]!,
+    normalizedWeight: totalRaw > 0 ? rawWeights[i]! / totalRaw : 0,
+    position: i,
+    totalTouchPoints: n,
+  }));
+  
+  return {
+    leadId,
+    model,
+    touchPoints: relevantPoints,
+    weights,
+    ...(conversionPoint ? { conversionEventId: conversionPoint.eventId } : {}),
+    totalWeight: totalRaw,
+  };
+}
+
+export function compareAttributionModels(touchPoints: readonly TouchPoint[], models: readonly AttributionModelType[]): readonly AttributionResult[] {
+  return models.map(model => computeAttribution(touchPoints, model));
+}
+
+// --- Cross-Lead Event Correlation ---
+
+export interface CrossLeadCorrelation {
+  readonly eventType: string;
+  readonly leadIds: readonly string[];
+  readonly occurrences: number;
+  readonly earliestAt: number;
+  readonly latestAt: number;
+  readonly averageScore: number;
+}
+
+export function findCrossLeadEventCorrelations(state: EngineState, minLeadCount: number = 2): readonly CrossLeadCorrelation[] {
+  const typeToLeads = new Map<string, Map<string, { count: number; earliest: number; latest: number }>>();
+  
+  for (const event of Object.values(state.events)) {
+    const leadMap = typeToLeads.get(event.type) ?? new Map();
+    const existing = leadMap.get(event.leadId);
+    if (existing) {
+      existing.count += 1;
+      existing.earliest = Math.min(existing.earliest, event.occurredAt);
+      existing.latest = Math.max(existing.latest, event.occurredAt);
+    } else {
+      leadMap.set(event.leadId, { count: 1, earliest: event.occurredAt, latest: event.occurredAt });
+    }
+    typeToLeads.set(event.type, leadMap);
+  }
+  
+  const correlations: CrossLeadCorrelation[] = [];
+  
+  for (const [eventType, leadMap] of typeToLeads) {
+    if (leadMap.size < minLeadCount) continue;
+    
+    const leadIds = [...leadMap.keys()].sort();
+    let totalOccurrences = 0;
+    let earliest = Infinity;
+    let latest = 0;
+    let totalScore = 0;
+    
+    for (const [leadId, data] of leadMap) {
+      totalOccurrences += data.count;
+      earliest = Math.min(earliest, data.earliest);
+      latest = Math.max(latest, data.latest);
+      totalScore += state.scores[leadId] ?? 0;
+    }
+    
+    correlations.push({
+      eventType,
+      leadIds,
+      occurrences: totalOccurrences,
+      earliestAt: earliest === Infinity ? 0 : earliest,
+      latestAt: latest,
+      averageScore: leadIds.length > 0 ? totalScore / leadIds.length : 0,
+    });
+  }
+  
+  return correlations.sort((a, b) => b.leadIds.length - a.leadIds.length || a.eventType.localeCompare(b.eventType));
+}
+
+// --- Event Stream Compaction ---
+
+export interface CompactionResult {
+  readonly originalEventCount: number;
+  readonly compactedEventCount: number;
+  readonly removedDuplicates: number;
+  readonly removedOutOfOrder: number;
+  readonly compactedState: EngineState;
+}
+
+export function compactEventStream(state: EngineState, leadId: string): CompactionResult {
+  const events = getLeadEvents(state, leadId);
+  const originalCount = events.length;
+  const seenHashes = new Set<string>();
+  const compacted: DomainEvent[] = [];
+  let removedDups = 0;
+  let removedOutOfOrder = 0;
+  let prevTimestamp = -1;
+  
+  for (const event of events) {
+    // Build content hash for dedup
+    const hashParts = [event.type, event.category, String(event.occurredAt),
+      ...Object.entries(event.attributes).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`)];
+    let hash = 5381;
+    const content = hashParts.join("|");
+    for (let i = 0; i < content.length; i++) {
+      hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0;
+    }
+    const hashStr = String(hash >>> 0);
+    
+    if (seenHashes.has(hashStr)) {
+      removedDups++;
+      continue;
+    }
+    
+    if (event.occurredAt < prevTimestamp) {
+      removedOutOfOrder++;
+      continue;
+    }
+    
+    seenHashes.add(hashStr);
+    prevTimestamp = event.occurredAt;
+    compacted.push(event);
+  }
+  
+  const newEvents = { ...state.events };
+  const removedIds = new Set(events.filter(e => !compacted.some(c => c.id === e.id)).map(e => e.id));
+  for (const id of removedIds) delete (newEvents as Record<string, DomainEvent>)[id];
+  
+  const compactedState: EngineState = {
+    ...state,
+    events: newEvents,
+    eventIdsByLead: {
+      ...state.eventIdsByLead,
+      [leadId]: compacted.map(e => e.id),
+    },
+  };
+  
+  return {
+    originalEventCount: originalCount,
+    compactedEventCount: compacted.length,
+    removedDuplicates: removedDups,
+    removedOutOfOrder: removedOutOfOrder,
+    compactedState,
+  };
+}
