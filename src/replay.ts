@@ -173,6 +173,7 @@ export function getStateAtTimestamp(state: EngineState, timestamp: number): Time
     qualifications: {},
     segments: {},
     profiles: {},
+    leadHistory: {},
   };
   
   return {
