@@ -22,6 +22,39 @@ export interface Lead {
   readonly updatedAt: Timestamp;
 }
 
+export type LeadChangeKind = "created" | "attributes-updated" | "lifecycle-transitioned" | "ownership-assigned" | "consent-updated" | "profile-merged";
+
+export interface LeadChange {
+  readonly id: string;
+  readonly leadId: LeadId;
+  readonly kind: LeadChangeKind;
+  readonly occurredAt: Timestamp;
+  readonly sequence: number;
+  readonly previous: Readonly<Record<string, Scalar | LifecycleState | undefined>>;
+  readonly next: Readonly<Record<string, Scalar | LifecycleState | undefined>>;
+  readonly reason: string;
+}
+
+export interface LeadOwnership {
+  readonly ownerId: string;
+  readonly territory: string;
+  readonly assignedAt: Timestamp;
+}
+
+export interface ConsentState {
+  readonly email: "unknown" | "granted" | "revoked";
+  readonly phone: "unknown" | "granted" | "revoked";
+  readonly updatedAt: Timestamp;
+}
+
+export interface LeadProfile {
+  readonly leadId: LeadId;
+  readonly ownership?: LeadOwnership;
+  readonly consent: ConsentState;
+  readonly source?: string;
+  readonly tags: readonly string[];
+}
+
 export interface CreateLeadInput {
   readonly id: LeadId;
   readonly name: string;
@@ -159,6 +192,8 @@ export interface EngineState {
   readonly scoreHistory: Readonly<Record<LeadId, readonly ScoreExplanation[]>>;
   readonly qualifications: Readonly<Record<LeadId, QualificationResult>>;
   readonly segments: Readonly<Record<LeadId, SegmentResult>>;
+  readonly profiles: Readonly<Record<LeadId, LeadProfile>>;
+  readonly leadHistory: Readonly<Record<LeadId, readonly LeadChange[]>>;
 }
 
 export type Outcome<T> =

@@ -16,6 +16,8 @@ export function createEngineState(config: EngineConfig = defaultEngineConfig): E
     scoreHistory: {},
     qualifications: {},
     segments: {},
+    profiles: {},
+    leadHistory: {},
   };
 }
 

@@ -3,6 +3,7 @@ export { validateEngineConfig, validateRuleSet } from "./config.js";
 export { createEngine, createLeadInEngine, processEvent, refreshLeadIntelligence } from "./engine.js";
 export { processBatch } from "./batch.js";
 export { addLead, allowedLifecycleTransitions, createLead, transitionLifecycle, updateLeadAttributes } from "./leads.js";
+export { addLeadTag, compareLeadChanges, createLeadProfile, getLeadHistory, recordLeadChange, removeLeadTag, setLeadOwnership, updateConsent } from "./lead-history.js";
 export { appendEvent, getLeadEvents, queryEvents } from "./event-ledger.js";
 export { createEvent, compareEvents } from "./events.js";
 export { normalizeRules, validateRule } from "./scoring-rules.js";
