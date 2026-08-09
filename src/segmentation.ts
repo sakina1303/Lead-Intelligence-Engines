@@ -221,7 +221,7 @@ export function evaluateDecisionTree(lead: Lead, score: number, events: readonly
   while (current) {
     if (current.leafSegment) return current.leafSegment;
     
-    const val = features[current.feature];
+    const val: any = features[current.feature];
     let evalResult = false;
     
     if (val !== undefined) {
@@ -447,7 +447,6 @@ export function generateDynamicPolicy(
   });
   
   return {
-    id: policyId,
     fallback: fallbackSegment,
     rules: rules as any,
     advancedRules: rules
