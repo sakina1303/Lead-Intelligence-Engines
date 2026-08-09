@@ -91,6 +91,25 @@ export interface EventCondition {
   readonly lifecycle?: readonly LifecycleState[];
 }
 
+export type NumericOperator = "equals" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal";
+
+export type RuleExpression =
+  | { readonly kind: "all"; readonly expressions: readonly RuleExpression[] }
+  | { readonly kind: "any"; readonly expressions: readonly RuleExpression[] }
+  | { readonly kind: "not"; readonly expression: RuleExpression }
+  | { readonly kind: "event-condition"; readonly condition: EventCondition }
+  | { readonly kind: "lead-attribute"; readonly condition: AttributeCondition }
+  | { readonly kind: "event-attribute"; readonly condition: AttributeCondition }
+  | { readonly kind: "score"; readonly operator: NumericOperator; readonly value: number }
+  | { readonly kind: "event-count"; readonly eventType?: string; readonly category?: EventCategory; readonly operator: NumericOperator; readonly value: number };
+
+export interface RuleEvaluationContext {
+  readonly lead: Lead;
+  readonly event: DomainEvent;
+  readonly score: number;
+  readonly eventHistory: readonly DomainEvent[];
+}
+
 export interface ScoringRule {
   readonly id: RuleId;
   readonly name: string;
@@ -98,6 +117,7 @@ export interface ScoringRule {
   readonly priority: number;
   readonly delta: number;
   readonly condition: EventCondition;
+  readonly expression?: RuleExpression;
   readonly stopProcessing?: boolean;
 }
 

@@ -8,7 +8,7 @@ export { appendEvent, getLeadEvents, queryEvents } from "./event-ledger.js";
 export { collectEventEvidence, countEventsByLead, eventsInWindow, queryEventLedger, summarizeEventTypes } from "./event-query.js";
 export { createEvent, compareEvents } from "./events.js";
 export { normalizeRules, validateRule } from "./scoring-rules.js";
-export { matchingRules, ruleMatches, selectRules } from "./rule-evaluation.js";
+export { compareNumber, evaluateRuleExpression, explainRuleExpression, expressionRuleMatches, matchingRules, ruleMatches, selectRules } from "./rule-evaluation.js";
 export { clampScore, scoreEvent, scoreForLead } from "./scoring.js";
 export { evaluateQualification } from "./qualification.js";
 export { assignSegment } from "./segmentation.js";
