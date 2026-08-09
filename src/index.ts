@@ -13,5 +13,6 @@ export { clampScore, scoreEvent, scoreForLead, scoreProjectionForLead } from "./
 export { evaluateQualification } from "./qualification.js";
 export { assignSegment } from "./segmentation.js";
 export { rankLeads } from "./ranking.js";
+export * from "./machine-learning.js";
 export { summarize } from "./analytics.js";
 export { replayLeadScoring } from "./replay.js";
