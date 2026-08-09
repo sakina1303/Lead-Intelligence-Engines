@@ -1,4 +1,4 @@
-import type { EngineState, RankEntry, QualificationState } from "./contracts.js";
+import type { EngineState, RankEntry, QualificationState, Lead } from "./contracts.js";
 
 const qualificationWeight: Record<QualificationState, number> = { "sales-qualified": 3, "marketing-qualified": 2, unqualified: 1, disqualified: 0 };
 
