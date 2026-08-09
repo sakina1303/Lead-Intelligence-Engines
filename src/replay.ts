@@ -510,7 +510,7 @@ export interface RuleSensitivity {
 export function analyzeRuleSensitivity(
   state: EngineState, 
   leadId: string, 
-  currentRules: readonly ScoringRule[],
+  _currentRules: readonly ScoringRule[],
   qualificationPolicies: readonly import("./contracts.js").QualificationPolicy[]
 ): Outcome<readonly RuleSensitivity[]> {
   const baseScore = state.scores[leadId] ?? 0;
