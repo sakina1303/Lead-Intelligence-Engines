@@ -571,8 +571,8 @@ export function evaluateProbabilisticRule(
     const totalAttrs = Object.keys(rule.condition.attributes).length;
     
     if (totalAttrs > 0) {
-      for (const [key, val] of Object.entries(rule.condition.attributes)) {
-        if (event.attributes[key] === val) matchedAttrCount++;
+      for (const attr of rule.condition.attributes) {
+        if (attributeMatches(event.attributes, attr)) matchedAttrCount++;
       }
       
       const attrMatchRatio = matchedAttrCount / totalAttrs;
@@ -643,14 +643,14 @@ export function detectRuleConflicts(rules: readonly ScoringRule[]): readonly Rul
         const bAttrs = JSON.stringify(b.condition.attributes ?? {});
         
         if (aAttrs === bAttrs) {
-          if (Math.sign(a.points) !== Math.sign(b.points) && a.points !== 0 && b.points !== 0) {
+          if (Math.sign(a.delta) !== Math.sign(b.delta) && a.delta !== 0 && b.delta !== 0) {
             conflicts.push({
               ruleIdA: a.id,
               ruleIdB: b.id,
               conflictType: "opposing_outcomes",
               severity: 1.0 // Maximum severity
             });
-          } else if (a.points === b.points && a.priority === b.priority) {
+          } else if (a.delta === b.delta && a.priority === b.priority) {
             conflicts.push({
               ruleIdA: a.id,
               ruleIdB: b.id,
@@ -733,7 +733,7 @@ export function inferScoringRules(
   
   // Count global frequencies
   const globalFreq: Record<string, number> = {};
-  for (const [leadId, types] of Object.entries(eventCountsByLead)) {
+  for (const [_, types] of Object.entries(eventCountsByLead)) {
     for (const type of types) {
       globalFreq[type] = (globalFreq[type] ?? 0) + 1;
     }
@@ -772,10 +772,9 @@ export function inferScoringRules(
         const suggestedRule: ScoringRule = {
           id: `inferred_rule_${type.replace(/[^a-zA-Z0-9]/g, '_')}`,
           name: `Inferred: High Conversion on ${type}`,
-          description: `Automatically inferred rule for event type ${type}`,
           enabled: true,
           priority: 50,
-          points: Math.min(100, suggestedPoints),
+          delta: Math.min(100, suggestedPoints),
           condition: {
             eventType: type
           }
@@ -826,7 +825,7 @@ export function simulateRuleImpact(
       const res = results[rule.id]!;
       res.triggers++;
       res.leads.add(lead.id);
-      res.points += rule.points;
+      res.points += rule.delta;
     }
   }
   
@@ -857,7 +856,7 @@ export function clusterRules(rules: readonly ScoringRule[], k: number): readonly
     return {
       rule: r,
       features: {
-        points: r.points,
+        delta: r.delta,
         priority: r.priority,
         hasEventType: r.condition.eventType ? 1 : 0,
         hasCategory: r.condition.category ? 1 : 0,
