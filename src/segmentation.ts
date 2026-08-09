@@ -275,11 +275,14 @@ export function buildKDTree(points: readonly KDPoint[], depth: number = 0): KDNo
   const medianIdx = Math.floor(sorted.length / 2);
   const medianPoint = sorted[medianIdx]!;
   
+  const left = buildKDTree(sorted.slice(0, medianIdx), depth + 1);
+  const right = buildKDTree(sorted.slice(medianIdx + 1), depth + 1);
+  
   return {
     point: medianPoint,
     axis,
-    left: buildKDTree(sorted.slice(0, medianIdx), depth + 1),
-    right: buildKDTree(sorted.slice(medianIdx + 1), depth + 1)
+    ...(left !== undefined ? { left } : {}),
+    ...(right !== undefined ? { right } : {})
   };
 }
 
