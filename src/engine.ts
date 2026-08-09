@@ -320,3 +320,332 @@ export function processEventWithPlugins(state: EngineState, input: CreateEventIn
   const result = processEvent(state, preProcessedInput, rules, evaluatedAt);
   return GlobalPluginRegistry.applyPostProcess(result.state, result);
 }
+
+// --- State Snapshotting and Time Travel ---
+
+export interface EngineSnapshot {
+  readonly snapshotId: string;
+  readonly timestamp: number;
+  readonly state: EngineState;
+  readonly compressed: boolean;
+}
+
+export function createSnapshot(state: EngineState, timestamp: number, id: string): EngineSnapshot {
+  return {
+    snapshotId: id,
+    timestamp,
+    // Deep clone to prevent mutations from affecting snapshot
+    state: JSON.parse(JSON.stringify(state)) as EngineState,
+    compressed: false
+  };
+}
+
+export function restoreSnapshot(snapshot: EngineSnapshot): EngineState {
+  return JSON.parse(JSON.stringify(snapshot.state)) as EngineState;
+}
+
+export interface StateDifference {
+  readonly addedLeads: readonly string[];
+  readonly removedLeads: readonly string[];
+  readonly changedScores: readonly { leadId: string; oldScore: number; newScore: number }[];
+  readonly newEvents: readonly string[];
+}
+
+export function compareSnapshots(oldSnapshot: EngineSnapshot, newSnapshot: EngineSnapshot): StateDifference {
+  const oldState = oldSnapshot.state;
+  const newState = newSnapshot.state;
+  
+  const addedLeads: string[] = [];
+  const removedLeads: string[] = [];
+  const changedScores: { leadId: string; oldScore: number; newScore: number }[] = [];
+  const newEvents: string[] = [];
+  
+  for (const leadId of Object.keys(newState.leads)) {
+    if (!oldState.leads[leadId]) addedLeads.push(leadId);
+  }
+  
+  for (const leadId of Object.keys(oldState.leads)) {
+    if (!newState.leads[leadId]) removedLeads.push(leadId);
+  }
+  
+  for (const leadId of Object.keys(newState.scores)) {
+    const newScore = newState.scores[leadId] ?? 0;
+    const oldScore = oldState.scores[leadId] ?? 0;
+    if (newScore !== oldScore) {
+      changedScores.push({ leadId, oldScore, newScore });
+    }
+  }
+  
+  for (const eventId of Object.keys(newState.events)) {
+    if (!oldState.events[eventId]) newEvents.push(eventId);
+  }
+  
+  return { addedLeads, removedLeads, changedScores, newEvents };
+}
+
+// --- Event Stream CQRS Aggregators ---
+
+export interface LeadAggregationView {
+  readonly leadId: string;
+  readonly totalEvents: number;
+  readonly totalScore: number;
+  readonly firstSeen: number;
+  readonly lastSeen: number;
+  readonly mostFrequentCategory: string;
+  readonly eventTypeCounts: Readonly<Record<string, number>>;
+}
+
+export function buildLeadAggregationView(state: EngineState, leadId: string): LeadAggregationView {
+  const events = getLeadEvents(state, leadId);
+  const score = state.scores[leadId] ?? 0;
+  
+  if (events.length === 0) {
+    return {
+      leadId, totalEvents: 0, totalScore: score, firstSeen: 0, lastSeen: 0,
+      mostFrequentCategory: "none", eventTypeCounts: {}
+    };
+  }
+  
+  let first = Number.MAX_SAFE_INTEGER;
+  let last = 0;
+  const typeCounts: Record<string, number> = {};
+  const catCounts: Record<string, number> = {};
+  
+  for (const e of events) {
+    if (e.occurredAt < first) first = e.occurredAt;
+    if (e.occurredAt > last) last = e.occurredAt;
+    
+    typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1;
+    catCounts[e.category] = (catCounts[e.category] ?? 0) + 1;
+  }
+  
+  let mostFreqCat = "none";
+  let maxCatCount = 0;
+  for (const [cat, count] of Object.entries(catCounts)) {
+    if (count > maxCatCount) {
+      maxCatCount = count;
+      mostFreqCat = cat;
+    }
+  }
+  
+  return {
+    leadId,
+    totalEvents: events.length,
+    totalScore: score,
+    firstSeen: first,
+    lastSeen: last,
+    mostFrequentCategory: mostFreqCat,
+    eventTypeCounts: typeCounts
+  };
+}
+
+export interface GlobalAggregationView {
+  readonly totalLeads: number;
+  readonly activeLeads24h: number; // Leads with events in last 24h
+  readonly conversionRate: number;
+  readonly averageScore: number;
+  readonly eventsByCategory: Readonly<Record<string, number>>;
+}
+
+export function buildGlobalAggregationView(state: EngineState, now: number): GlobalAggregationView {
+  const leadIds = Object.keys(state.leads);
+  const totalLeads = leadIds.length;
+  
+  if (totalLeads === 0) {
+    return { totalLeads: 0, activeLeads24h: 0, conversionRate: 0, averageScore: 0, eventsByCategory: {} };
+  }
+  
+  let convertedCount = 0;
+  let activeCount = 0;
+  let scoreSum = 0;
+  const catCounts: Record<string, number> = {};
+  
+  const dayMs = 24 * 60 * 60 * 1000;
+  
+  for (const id of leadIds) {
+    const lead = state.leads[id]!;
+    if (lead.lifecycle === "converted") convertedCount++;
+    scoreSum += state.scores[id] ?? 0;
+    
+    const events = getLeadEvents(state, id);
+    let active = false;
+    for (const e of events) {
+      catCounts[e.category] = (catCounts[e.category] ?? 0) + 1;
+      if (now - e.occurredAt <= dayMs) {
+        active = true;
+      }
+    }
+    if (active) activeCount++;
+  }
+  
+  return {
+    totalLeads,
+    activeLeads24h: activeCount,
+    conversionRate: convertedCount / totalLeads,
+    averageScore: scoreSum / totalLeads,
+    eventsByCategory: catCounts
+  };
+}
+
+// --- Deterministic Leader Election (Raft-like Node State) ---
+// Note: This implements a pure, deterministic simulation of a distributed consensus state machine
+// without actual network calls, entirely driven by explicitly passed events.
+
+export type NodeRole = "follower" | "candidate" | "leader";
+
+export interface NodeState {
+  readonly nodeId: string;
+  readonly role: NodeRole;
+  readonly currentTerm: number;
+  readonly votedFor: string | null;
+  readonly log: readonly { readonly term: number; readonly command: any }[];
+  readonly commitIndex: number;
+  readonly lastApplied: number;
+}
+
+export interface ElectionConfig {
+  readonly clusterSize: number;
+  readonly electionTimeoutMinMs: number;
+  readonly electionTimeoutMaxMs: number;
+  readonly heartbeatIntervalMs: number;
+}
+
+// We simulate a network event
+export type NetworkEvent = 
+  | { type: "timer_tick"; now: number; randomEntropy: number } // randomEntropy [0,1] used deterministically
+  | { type: "request_vote"; term: number; candidateId: string; lastLogIndex: number; lastLogTerm: number }
+  | { type: "vote_reply"; term: number; voteGranted: boolean; fromNodeId: string }
+  | { type: "append_entries"; term: number; leaderId: string; prevLogIndex: number; prevLogTerm: number; entries: readonly any[]; leaderCommit: number }
+  | { type: "append_reply"; term: number; success: boolean; matchIndex: number; fromNodeId: string };
+
+export function processConsensusEvent(
+  node: NodeState, 
+  config: ElectionConfig, 
+  event: NetworkEvent, 
+  stateExt: { 
+    lastActivity: number, 
+    votesReceived: Set<string>, 
+    electionTimeout: number 
+  }
+): { node: NodeState; messagesToSend: NetworkEvent[]; stateExt: typeof stateExt } {
+  
+  let nextNode = { ...node };
+  const messagesToSend: NetworkEvent[] = [];
+  const nextExt = { ...stateExt };
+  
+  // Step down if higher term seen
+  if ('term' in event && event.term > nextNode.currentTerm) {
+    nextNode = { ...nextNode, currentTerm: event.term, role: "follower", votedFor: null };
+    nextExt.votesReceived.clear();
+  }
+  
+  switch (event.type) {
+    case "timer_tick": {
+      // Check election timeout
+      if (nextNode.role !== "leader" && (event.now - nextExt.lastActivity >= nextExt.electionTimeout)) {
+        // Start election
+        nextNode = { ...nextNode, role: "candidate", currentTerm: nextNode.currentTerm + 1, votedFor: nextNode.nodeId };
+        nextExt.lastActivity = event.now;
+        // Deterministic timeout based on entropy
+        nextExt.electionTimeout = config.electionTimeoutMinMs + (event.randomEntropy * (config.electionTimeoutMaxMs - config.electionTimeoutMinMs));
+        nextExt.votesReceived = new Set([nextNode.nodeId]);
+        
+        messagesToSend.push({
+          type: "request_vote",
+          term: nextNode.currentTerm,
+          candidateId: nextNode.nodeId,
+          lastLogIndex: nextNode.log.length - 1,
+          lastLogTerm: nextNode.log.length > 0 ? nextNode.log[nextNode.log.length - 1]!.term : 0
+        });
+      } else if (nextNode.role === "leader" && (event.now - nextExt.lastActivity >= config.heartbeatIntervalMs)) {
+        // Send heartbeat
+        nextExt.lastActivity = event.now;
+        messagesToSend.push({
+          type: "append_entries",
+          term: nextNode.currentTerm,
+          leaderId: nextNode.nodeId,
+          prevLogIndex: nextNode.log.length - 1,
+          prevLogTerm: nextNode.log.length > 0 ? nextNode.log[nextNode.log.length - 1]!.term : 0,
+          entries: [],
+          leaderCommit: nextNode.commitIndex
+        });
+      }
+      break;
+    }
+    
+    case "request_vote": {
+      let voteGranted = false;
+      const logOk = (event.lastLogTerm > (nextNode.log[nextNode.log.length - 1]?.term ?? 0)) ||
+                    (event.lastLogTerm === (nextNode.log[nextNode.log.length - 1]?.term ?? 0) && event.lastLogIndex >= nextNode.log.length - 1);
+                    
+      if (event.term === nextNode.currentTerm && (nextNode.votedFor === null || nextNode.votedFor === event.candidateId) && logOk) {
+        voteGranted = true;
+        nextNode = { ...nextNode, votedFor: event.candidateId };
+        nextExt.lastActivity = 0; // effectively resets timer
+      }
+      
+      messagesToSend.push({
+        type: "vote_reply",
+        term: nextNode.currentTerm,
+        voteGranted,
+        fromNodeId: nextNode.nodeId
+      });
+      break;
+    }
+    
+    case "vote_reply": {
+      if (nextNode.role === "candidate" && event.term === nextNode.currentTerm && event.voteGranted) {
+        nextExt.votesReceived.add(event.fromNodeId);
+        if (nextExt.votesReceived.size > config.clusterSize / 2) {
+          // Become leader
+          nextNode = { ...nextNode, role: "leader" };
+          // Send initial heartbeat
+          messagesToSend.push({
+            type: "append_entries",
+            term: nextNode.currentTerm,
+            leaderId: nextNode.nodeId,
+            prevLogIndex: nextNode.log.length - 1,
+            prevLogTerm: nextNode.log.length > 0 ? nextNode.log[nextNode.log.length - 1]!.term : 0,
+            entries: [],
+            leaderCommit: nextNode.commitIndex
+          });
+        }
+      }
+      break;
+    }
+    
+    case "append_entries": {
+      if (event.term >= nextNode.currentTerm) {
+        nextExt.lastActivity = 0; // reset timer
+      }
+      
+      let success = false;
+      if (event.term >= nextNode.currentTerm) {
+        // Log matching check (simplified)
+        if (event.prevLogIndex === -1 || (nextNode.log[event.prevLogIndex] && nextNode.log[event.prevLogIndex]!.term === event.prevLogTerm)) {
+          success = true;
+          // Append new entries and update commit index (simplified for this mock)
+          if (event.leaderCommit > nextNode.commitIndex) {
+            nextNode = { ...nextNode, commitIndex: Math.min(event.leaderCommit, nextNode.log.length - 1) };
+          }
+        }
+      }
+      
+      messagesToSend.push({
+        type: "append_reply",
+        term: nextNode.currentTerm,
+        success,
+        matchIndex: success ? event.prevLogIndex + event.entries.length : 0,
+        fromNodeId: nextNode.nodeId
+      });
+      break;
+    }
+    
+    case "append_reply": {
+      // For leader state tracking (simplified, normally updates nextIndex/matchIndex)
+      break;
+    }
+  }
+  
+  return { node: nextNode, messagesToSend, stateExt: nextExt };
+}
