@@ -1,4 +1,4 @@
-import type { AttributeCondition, DomainEvent, EventCondition, Lead, NumericOperator, RuleEvaluationContext, RuleExpression, ScoringRule } from "./contracts.js";
+import type { AttributeCondition, DomainEvent, EventCondition, Lead, NumericOperator, RuleEvaluationContext, RuleExpression, ScoringRule, EngineState } from "./contracts.js";
 import { compareRules, matchesAttributes } from "./scoring-rules.js";
 
 export type ASTNodeType = 
@@ -151,4 +151,388 @@ export function matchingRules(rules: readonly ScoringRule[], event: DomainEvent,
 export function selectRules(rules: readonly ScoringRule[], mode: "stack" | "highest-priority" | "first-match"): readonly ScoringRule[] {
   if (mode === "stack") return rules;
   return rules.length === 0 ? [] : [rules[0]!];
+}
+
+// --- AST Optimization Passes ---
+
+export function foldConstants(node: ASTNode): ASTNode {
+  switch (node.type) {
+    case "BinaryExpression": {
+      const bin = node as BinaryExpressionNode;
+      const left = foldConstants(bin.left);
+      const right = foldConstants(bin.right);
+      
+      if (left.type === "Literal" && right.type === "Literal") {
+        const lv = (left as LiteralNode).value;
+        const rv = (right as LiteralNode).value;
+        
+        switch (bin.operator) {
+          case "eq": return { type: "Literal", value: lv === rv } as LiteralNode;
+          case "neq": return { type: "Literal", value: lv !== rv } as LiteralNode;
+          case "gt": return { type: "Literal", value: typeof lv === "number" && typeof rv === "number" && lv > rv } as LiteralNode;
+          case "gte": return { type: "Literal", value: typeof lv === "number" && typeof rv === "number" && lv >= rv } as LiteralNode;
+          case "lt": return { type: "Literal", value: typeof lv === "number" && typeof rv === "number" && lv < rv } as LiteralNode;
+          case "lte": return { type: "Literal", value: typeof lv === "number" && typeof rv === "number" && lv <= rv } as LiteralNode;
+          default: break;
+        }
+      }
+      return { type: "BinaryExpression", operator: bin.operator, left, right } as BinaryExpressionNode;
+    }
+    
+    case "LogicalExpression": {
+      const log = node as LogicalExpressionNode;
+      const left = foldConstants(log.left);
+      const right = foldConstants(log.right);
+      
+      if (left.type === "Literal") {
+        const lv = (left as LiteralNode).value;
+        if (log.operator === "and") return lv ? right : { type: "Literal", value: false } as LiteralNode;
+        if (log.operator === "or") return lv ? { type: "Literal", value: true } as LiteralNode : right;
+      }
+      
+      return { type: "LogicalExpression", operator: log.operator, left, right } as LogicalExpressionNode;
+    }
+    
+    case "UnaryExpression": {
+      const un = node as UnaryExpressionNode;
+      const arg = foldConstants(un.argument);
+      
+      if (arg.type === "Literal" && un.operator === "not") {
+        return { type: "Literal", value: !(arg as LiteralNode).value } as LiteralNode;
+      }
+      
+      // Double negation elimination
+      if (un.operator === "not" && arg.type === "UnaryExpression" && (arg as UnaryExpressionNode).operator === "not") {
+        return (arg as UnaryExpressionNode).argument;
+      }
+      
+      return { type: "UnaryExpression", operator: un.operator, argument: arg } as UnaryExpressionNode;
+    }
+    
+    case "ArrayExpression": {
+      const arr = node as ArrayExpressionNode;
+      return { type: "ArrayExpression", elements: arr.elements.map(foldConstants) } as ArrayExpressionNode;
+    }
+    
+    default:
+      return node;
+  }
+}
+
+export function eliminateDeadBranches(node: ASTNode): ASTNode {
+  switch (node.type) {
+    case "LogicalExpression": {
+      const log = node as LogicalExpressionNode;
+      const left = eliminateDeadBranches(log.left);
+      const right = eliminateDeadBranches(log.right);
+      
+      // "and" with false is always false
+      if (left.type === "Literal" && (left as LiteralNode).value === false && log.operator === "and") {
+        return { type: "Literal", value: false } as LiteralNode;
+      }
+      // "or" with true is always true
+      if (left.type === "Literal" && (left as LiteralNode).value === true && log.operator === "or") {
+        return { type: "Literal", value: true } as LiteralNode;
+      }
+      // "and" with true simplifies to right
+      if (left.type === "Literal" && (left as LiteralNode).value === true && log.operator === "and") {
+        return right;
+      }
+      // "or" with false simplifies to right
+      if (left.type === "Literal" && (left as LiteralNode).value === false && log.operator === "or") {
+        return right;
+      }
+      
+      return { type: "LogicalExpression", operator: log.operator, left, right } as LogicalExpressionNode;
+    }
+    
+    case "UnaryExpression": {
+      const un = node as UnaryExpressionNode;
+      return { type: "UnaryExpression", operator: un.operator, argument: eliminateDeadBranches(un.argument) } as UnaryExpressionNode;
+    }
+    
+    case "BinaryExpression": {
+      const bin = node as BinaryExpressionNode;
+      return { type: "BinaryExpression", operator: bin.operator, left: eliminateDeadBranches(bin.left), right: eliminateDeadBranches(bin.right) } as BinaryExpressionNode;
+    }
+    
+    default:
+      return node;
+  }
+}
+
+export function optimizeAST(node: ASTNode): ASTNode {
+  let current = node;
+  for (let pass = 0; pass < 3; pass++) {
+    const folded = foldConstants(current);
+    const pruned = eliminateDeadBranches(folded);
+    if (serializeAST(pruned) === serializeAST(current)) break;
+    current = pruned;
+  }
+  return current;
+}
+
+// --- AST Complexity ---
+
+export interface ASTComplexity {
+  readonly depth: number;
+  readonly nodeCount: number;
+  readonly branchCount: number;
+  readonly identifierCount: number;
+  readonly literalCount: number;
+  readonly complexityScore: number;
+}
+
+export function measureASTComplexity(node: ASTNode): ASTComplexity {
+  let nodeCount = 0;
+  let branchCount = 0;
+  let identifierCount = 0;
+  let literalCount = 0;
+  
+  function countDepth(n: ASTNode): number {
+    nodeCount++;
+    switch (n.type) {
+      case "Literal": literalCount++; return 1;
+      case "Identifier": identifierCount++; return 1;
+      case "BinaryExpression": {
+        branchCount++;
+        const bin = n as BinaryExpressionNode;
+        return 1 + Math.max(countDepth(bin.left), countDepth(bin.right));
+      }
+      case "LogicalExpression": {
+        branchCount++;
+        const log = n as LogicalExpressionNode;
+        return 1 + Math.max(countDepth(log.left), countDepth(log.right));
+      }
+      case "UnaryExpression":
+        return 1 + countDepth((n as UnaryExpressionNode).argument);
+      case "MemberExpression": {
+        const mem = n as MemberExpressionNode;
+        return 1 + Math.max(countDepth(mem.object), countDepth(mem.property));
+      }
+      case "ArrayExpression":
+        return 1 + (n as ArrayExpressionNode).elements.reduce((m, el) => Math.max(m, countDepth(el)), 0);
+      case "CallExpression":
+        return 1;
+    }
+    return 1;
+  }
+  
+  const depth = countDepth(node);
+  const complexityScore = depth * 2 + branchCount * 3 + nodeCount;
+  
+  return { depth, nodeCount, branchCount, identifierCount, literalCount, complexityScore };
+}
+
+export function exceedsComplexityBudget(node: ASTNode, maxDepth: number, maxNodes: number): boolean {
+  const complexity = measureASTComplexity(node);
+  return complexity.depth > maxDepth || complexity.nodeCount > maxNodes;
+}
+
+// --- AST Serialization ---
+
+export function serializeAST(node: ASTNode): string {
+  switch (node.type) {
+    case "Literal": {
+      const lit = node as LiteralNode;
+      return lit.value === null ? "null" : JSON.stringify(lit.value);
+    }
+    case "Identifier":
+      return `$${(node as IdentifierNode).name}`;
+    case "BinaryExpression": {
+      const bin = node as BinaryExpressionNode;
+      return `(${serializeAST(bin.left)} ${bin.operator} ${serializeAST(bin.right)})`;
+    }
+    case "LogicalExpression": {
+      const log = node as LogicalExpressionNode;
+      return `(${serializeAST(log.left)} ${log.operator} ${serializeAST(log.right)})`;
+    }
+    case "UnaryExpression": {
+      const un = node as UnaryExpressionNode;
+      return `(${un.operator} ${serializeAST(un.argument)})`;
+    }
+    case "MemberExpression": {
+      const mem = node as MemberExpressionNode;
+      return mem.computed
+        ? `${serializeAST(mem.object)}[${serializeAST(mem.property)}]`
+        : `${serializeAST(mem.object)}.${serializeAST(mem.property)}`;
+    }
+    case "ArrayExpression":
+      return `[${(node as ArrayExpressionNode).elements.map(serializeAST).join(", ")}]`;
+    default:
+      return "<unknown>";
+  }
+}
+
+export function deserializeLiteral(token: string): LiteralNode {
+  if (token === "null") return { type: "Literal", value: null };
+  if (token === "true") return { type: "Literal", value: true };
+  if (token === "false") return { type: "Literal", value: false };
+  const num = Number(token);
+  if (!isNaN(num) && token.length > 0) return { type: "Literal", value: num };
+  // Remove quotes for string
+  if (token.startsWith('"') && token.endsWith('"')) return { type: "Literal", value: token.slice(1, -1) };
+  return { type: "Literal", value: token };
+}
+
+// --- Expression Equivalence ---
+
+export function areExpressionsEquivalent(a: ASTNode, b: ASTNode): boolean {
+  if (a.type !== b.type) return false;
+  
+  switch (a.type) {
+    case "Literal":
+      return (a as LiteralNode).value === (b as LiteralNode).value;
+    case "Identifier":
+      return (a as IdentifierNode).name === (b as IdentifierNode).name;
+    case "BinaryExpression": {
+      const ba = a as BinaryExpressionNode;
+      const bb = b as BinaryExpressionNode;
+      if (ba.operator !== bb.operator) return false;
+      // Check direct match
+      if (areExpressionsEquivalent(ba.left, bb.left) && areExpressionsEquivalent(ba.right, bb.right)) return true;
+      // Check commutative operators
+      if ((ba.operator === "eq" || ba.operator === "neq") &&
+          areExpressionsEquivalent(ba.left, bb.right) && areExpressionsEquivalent(ba.right, bb.left)) return true;
+      return false;
+    }
+    case "LogicalExpression": {
+      const la = a as LogicalExpressionNode;
+      const lb = b as LogicalExpressionNode;
+      if (la.operator !== lb.operator) return false;
+      if (areExpressionsEquivalent(la.left, lb.left) && areExpressionsEquivalent(la.right, lb.right)) return true;
+      // Commutative check for and/or
+      if (areExpressionsEquivalent(la.left, lb.right) && areExpressionsEquivalent(la.right, lb.left)) return true;
+      return false;
+    }
+    case "UnaryExpression": {
+      const ua = a as UnaryExpressionNode;
+      const ub = b as UnaryExpressionNode;
+      return ua.operator === ub.operator && areExpressionsEquivalent(ua.argument, ub.argument);
+    }
+    case "ArrayExpression": {
+      const aa = a as ArrayExpressionNode;
+      const ab = b as ArrayExpressionNode;
+      return aa.elements.length === ab.elements.length && aa.elements.every((el, i) => areExpressionsEquivalent(el, ab.elements[i]!));
+    }
+    case "MemberExpression": {
+      const ma = a as MemberExpressionNode;
+      const mb = b as MemberExpressionNode;
+      return ma.computed === mb.computed && areExpressionsEquivalent(ma.object, mb.object) && areExpressionsEquivalent(ma.property, mb.property);
+    }
+    default:
+      return false;
+  }
+}
+
+// --- Partial Evaluation ---
+
+export interface PartialEvalResult {
+  readonly isResolved: boolean;
+  readonly value: unknown;
+  readonly residual: ASTNode;
+}
+
+export function partialEvaluateAST(node: ASTNode, context: EvaluationContext): PartialEvalResult {
+  switch (node.type) {
+    case "Literal":
+      return { isResolved: true, value: (node as LiteralNode).value, residual: node };
+    
+    case "Identifier": {
+      const id = node as IdentifierNode;
+      if (Object.prototype.hasOwnProperty.call(context, id.name)) {
+        const val = context[id.name];
+        return { isResolved: true, value: val, residual: { type: "Literal", value: val as string | number | boolean | null } as LiteralNode };
+      }
+      return { isResolved: false, value: undefined, residual: node };
+    }
+    
+    case "BinaryExpression": {
+      const bin = node as BinaryExpressionNode;
+      const left = partialEvaluateAST(bin.left, context);
+      const right = partialEvaluateAST(bin.right, context);
+      
+      if (left.isResolved && right.isResolved) {
+        const result = evaluateAST(node, context);
+        return { isResolved: true, value: result, residual: { type: "Literal", value: result } as LiteralNode };
+      }
+      
+      return { isResolved: false, value: undefined, residual: { type: "BinaryExpression", operator: bin.operator, left: left.residual, right: right.residual } as BinaryExpressionNode };
+    }
+    
+    case "LogicalExpression": {
+      const log = node as LogicalExpressionNode;
+      const left = partialEvaluateAST(log.left, context);
+      
+      // Short-circuit: "and" with false, "or" with true
+      if (left.isResolved) {
+        if (log.operator === "and" && !left.value) return { isResolved: true, value: false, residual: { type: "Literal", value: false } as LiteralNode };
+        if (log.operator === "or" && left.value) return { isResolved: true, value: true, residual: { type: "Literal", value: true } as LiteralNode };
+        
+        const right = partialEvaluateAST(log.right, context);
+        if (right.isResolved) {
+          const result = evaluateAST(node, context);
+          return { isResolved: true, value: result, residual: { type: "Literal", value: result } as LiteralNode };
+        }
+        return { isResolved: false, value: undefined, residual: right.residual };
+      }
+      
+      const right = partialEvaluateAST(log.right, context);
+      return { isResolved: false, value: undefined, residual: { type: "LogicalExpression", operator: log.operator, left: left.residual, right: right.residual } as LogicalExpressionNode };
+    }
+    
+    case "UnaryExpression": {
+      const un = node as UnaryExpressionNode;
+      const arg = partialEvaluateAST(un.argument, context);
+      if (arg.isResolved) {
+        const result = evaluateAST(node, context);
+        return { isResolved: true, value: result, residual: { type: "Literal", value: result } as LiteralNode };
+      }
+      return { isResolved: false, value: undefined, residual: { type: "UnaryExpression", operator: un.operator, argument: arg.residual } as UnaryExpressionNode };
+    }
+    
+    default:
+      return { isResolved: false, value: undefined, residual: node };
+  }
+}
+
+// --- Rule Coverage Analysis ---
+
+export interface RuleCoverageReport {
+  readonly totalRules: number;
+  readonly matchedRules: number;
+  readonly unmatchedRules: readonly string[];
+  readonly coveragePercent: number;
+  readonly ruleMatchCounts: Readonly<Record<string, number>>;
+}
+
+export function analyzeRuleCoverage(state: EngineState, rules: readonly ScoringRule[]): RuleCoverageReport {
+  const matchCounts: Record<string, number> = {};
+  for (const rule of rules) matchCounts[rule.id] = 0;
+  
+  const events = Object.values(state.events) as readonly DomainEvent[];
+  
+  for (const event of events) {
+    const lead = state.leads[event.leadId];
+    if (!lead) continue;
+    
+    for (const rule of rules) {
+      if (ruleMatches(rule, event, lead)) {
+        matchCounts[rule.id] = (matchCounts[rule.id] ?? 0) + 1;
+      }
+    }
+  }
+  
+  const unmatchedRules = Object.entries(matchCounts)
+    .filter(([, count]) => count === 0)
+    .map(([id]) => id)
+    .sort();
+  
+  return {
+    totalRules: rules.length,
+    matchedRules: rules.length - unmatchedRules.length,
+    unmatchedRules,
+    coveragePercent: rules.length === 0 ? 100 : ((rules.length - unmatchedRules.length) / rules.length) * 100,
+    ruleMatchCounts: matchCounts,
+  };
 }
