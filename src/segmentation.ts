@@ -200,6 +200,261 @@ export function assignHierarchicalSegment(lead: Lead, score: number, events: rea
 // --- Micro-Segmentation & Decision Trees ---
 
 export interface DecisionTreeNode {
+  readonly feature: string;
+  readonly operator: "==" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "contains";
+  readonly threshold: string | number | boolean | readonly (string | number)[];
+  readonly trueBranch?: DecisionTreeNode;
+  readonly falseBranch?: DecisionTreeNode;
+  readonly leafSegment?: string;
+}
+
+export function evaluateDecisionTree(lead: Lead, score: number, events: readonly DomainEvent[], tree: DecisionTreeNode): string {
+  const features = {
+    ...lead.attributes,
+    score,
+    eventCount: events.length,
+    lifecycle: lead.lifecycle
+  };
+  
+  let current: DecisionTreeNode | undefined = tree;
+  
+  while (current) {
+    if (current.leafSegment) return current.leafSegment;
+    
+    const val = features[current.feature];
+    let evalResult = false;
+    
+    if (val !== undefined) {
+      switch (current.operator) {
+        case "==": evalResult = val === current.threshold; break;
+        case "!=": evalResult = val !== current.threshold; break;
+        case ">": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val > current.threshold; break;
+        case "<": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val < current.threshold; break;
+        case ">=": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val >= current.threshold; break;
+        case "<=": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val <= current.threshold; break;
+        case "in": evalResult = Array.isArray(current.threshold) && current.threshold.includes(val as any); break;
+        case "contains": evalResult = typeof val === 'string' && typeof current.threshold === 'string' && val.includes(current.threshold); break;
+      }
+    }
+    
+    current = evalResult ? current.trueBranch : current.falseBranch;
+  }
+  
+  return "unsegmented";
+}
+
+// --- Geographic Segmentation ---
+
+export interface GeoRegionDef {
+  readonly id: string;
+  readonly countries: readonly string[];
+  readonly statesOrProvinces?: readonly string[];
+  readonly timezones?: readonly string[];
+}
+
+export function assignGeoSegment(lead: Lead, regions: readonly GeoRegionDef[]): string[] {
+  const assigned: string[] = [];
+  const leadCountry = lead.attributes['country'];
+  const leadState = lead.attributes['state'];
+  const leadTimezone = lead.attributes['timezone'];
+  
+  for (const region of regions) {
+    let match = false;
+    
+    if (leadCountry && region.countries.includes(String(leadCountry))) {
+      match = true;
+      if (region.statesOrProvinces && leadState && !region.statesOrProvinces.includes(String(leadState))) {
+        match = false;
+      }
+      if (region.timezones && leadTimezone && !region.timezones.includes(String(leadTimezone))) {
+        match = false;
+      }
+    }
+    
+    if (match) assigned.push(region.id);
+  }
+  
+  return assigned;
+}
+
+// --- Demographic/Firmographic Segmentation ---
+
+export interface FirmographicDef {
+  readonly id: string;
+  readonly minEmployees?: number;
+  readonly maxEmployees?: number;
+  readonly minRevenue?: number;
+  readonly maxRevenue?: number;
+  readonly industries?: readonly string[];
+}
+
+export function assignFirmographicSegment(lead: Lead, segments: readonly FirmographicDef[]): string[] {
+  const assigned: string[] = [];
+  const employees = Number(lead.attributes['employees'] ?? 0);
+  const revenue = Number(lead.attributes['revenue'] ?? 0);
+  const industry = String(lead.attributes['industry'] ?? '');
+  
+  for (const seg of segments) {
+    let match = true;
+    
+    if (seg.minEmployees !== undefined && employees < seg.minEmployees) match = false;
+    if (seg.maxEmployees !== undefined && employees > seg.maxEmployees) match = false;
+    if (seg.minRevenue !== undefined && revenue < seg.minRevenue) match = false;
+    if (seg.maxRevenue !== undefined && revenue > seg.maxRevenue) match = false;
+    if (seg.industries !== undefined && industry && !seg.industries.includes(industry)) match = false;
+    
+    if (match) assigned.push(seg.id);
+  }
+  
+  return assigned;
+}
+
+// --- Technographic Segmentation ---
+
+export interface TechnographicDef {
+  readonly id: string;
+  readonly requiredTechStack: readonly string[];
+  readonly excludeTechStack?: readonly string[];
+}
+
+export function assignTechnographicSegment(lead: Lead, segments: readonly TechnographicDef[]): string[] {
+  const assigned: string[] = [];
+  const leadTech = Array.isArray(lead.attributes['tech_stack']) ? lead.attributes['tech_stack'] as string[] : [];
+  
+  if (leadTech.length === 0) return assigned;
+  
+  for (const seg of segments) {
+    let match = true;
+    for (const req of seg.requiredTechStack) {
+      if (!leadTech.includes(req)) {
+        match = false;
+        break;
+      }
+    }
+    
+    if (match && seg.excludeTechStack) {
+      for (const excl of seg.excludeTechStack) {
+        if (leadTech.includes(excl)) {
+          match = false;
+          break;
+        }
+      }
+    }
+    
+    if (match) assigned.push(seg.id);
+  }
+  
+  return assigned;
+}
+
+// --- Predictive Segment Migration (Markov Chain Mock) ---
+
+export interface SegmentTransitionMatrix {
+  readonly segments: readonly string[];
+  readonly probabilities: Readonly<Record<string, Readonly<Record<string, number>>>>; // from -> to -> prob
+}
+
+export interface SegmentForecast {
+  readonly leadId: string;
+  readonly currentSegment: string;
+  readonly predictedNextSegment: string;
+  readonly probability: number;
+  readonly expectedDaysToTransition: number;
+}
+
+export function forecastSegmentMigration(
+  leadId: string,
+  currentSegment: string,
+  matrix: SegmentTransitionMatrix
+): SegmentForecast {
+  
+  const transitionsFromCurrent = matrix.probabilities[currentSegment];
+  
+  if (!transitionsFromCurrent) {
+    return {
+      leadId,
+      currentSegment,
+      predictedNextSegment: currentSegment,
+      probability: 1.0,
+      expectedDaysToTransition: Infinity
+    };
+  }
+  
+  let maxProb = 0;
+  let nextSegment = currentSegment;
+  
+  for (const [toSegment, prob] of Object.entries(transitionsFromCurrent)) {
+    if (toSegment !== currentSegment && prob > maxProb) {
+      maxProb = prob;
+      nextSegment = toSegment;
+    }
+  }
+  
+  // Mock expected days based on probability (higher prob = faster transition)
+  const expectedDaysToTransition = maxProb > 0 ? Math.max(1, 30 * (1 - maxProb)) : Infinity;
+  
+  return {
+    leadId,
+    currentSegment,
+    predictedNextSegment: nextSegment,
+    probability: maxProb,
+    expectedDaysToTransition
+  };
+}
+
+// --- Dynamic Segmentation Rule Generator ---
+
+export interface SegmentationRuleTemplate {
+  readonly templateId: string;
+  readonly basePriority: number;
+  readonly generate: (params: Record<string, string | number>) => AdvancedSegmentRule;
+}
+
+export const defaultRuleTemplates: Record<string, SegmentationRuleTemplate> = {
+  "high_value_geo": {
+    templateId: "high_value_geo",
+    basePriority: 100,
+    generate: (params) => ({
+      id: `rule_geo_${params['country']}`,
+      name: `High Value ${params['country']}`,
+      priority: 100,
+      minimumScore: Number(params['min_score'] ?? 50),
+      requiredAttributes: { country: String(params['country']) }
+    })
+  },
+  "active_users": {
+    templateId: "active_users",
+    basePriority: 50,
+    generate: (params) => ({
+      id: `rule_active_${params['event_type']}`,
+      name: `Active: ${params['event_type']}`,
+      priority: 50,
+      requiredEventTypes: [String(params['event_type'])]
+    })
+  }
+};
+
+export function generateDynamicPolicy(
+  policyId: string,
+  fallbackSegment: string,
+  templates: readonly { templateId: string; params: Record<string, string | number> }[]
+): AdvancedSegmentPolicy {
+  
+  const rules = templates.map(t => {
+    const template = defaultRuleTemplates[t.templateId];
+    if (!template) throw new Error(`Template ${t.templateId} not found`);
+    return template.generate(t.params);
+  });
+  
+  return {
+    id: policyId,
+    fallback: fallbackSegment,
+    rules,
+    advancedRules: rules
+  };
+}
+
+export interface DecisionTreeNode {
   readonly attribute?: string; // e.g. "score", "events_count", or an attribute key
   readonly operator?: ">" | "<" | "==" | "includes";
   readonly value?: any;
