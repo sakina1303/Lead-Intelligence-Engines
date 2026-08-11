@@ -532,7 +532,7 @@ export function calculateEventAttribution(
 ): readonly AttributedEvent[] {
   if (events.length === 0 || totalScore === 0) return [];
   
-  const sorted = [...events].sort((a, b) => a.occurredAt - b.occurredAt);
+  const sorted = [...events].sort((a, b) => a.occurredAt - b.occurredAt || a.sequence - b.sequence || a.id.localeCompare(b.id));
   const n = sorted.length;
   
   const results: AttributedEvent[] = [];
@@ -593,65 +593,39 @@ export function calculateEventAttribution(
       break;
     }
     case "markov": {
-      // Simplified deterministic Markov Chain approximation
-      // We calculate removal effect for each event type in the path
       const removalEffects = new Map<string, number>();
-      
-      // Calculate default probability (simplified base rate)
-      const baseProb = 1.0; 
-      
-      // Calculate removal effect for each unique event type in path
       const uniqueTypes = new Set(sorted.map(e => e.type));
+
+      const pathInformation = (path: readonly DomainEvent[]): number => {
+        const types = new Set(path.map((event) => event.type));
+        const transitions = new Set(path.slice(1).map((event, index) => `${path[index]!.type}\u0000${event.type}`));
+        return types.size + transitions.size;
+      };
+
+      const completePathInformation = pathInformation(sorted);
       for (const t of uniqueTypes) {
-        // If we remove this type, what's the path probability?
-        // Simplified: removing a type decreases probability proportional to its frequency in the path
-        const count = sorted.filter(e => e.type === t).length;
-        const probWithout = Math.pow(0.5, count); 
-        const removalEffect = baseProb - probWithout;
-        removalEffects.set(t, removalEffect);
+        const pathWithoutType = sorted.filter((event) => event.type !== t);
+        removalEffects.set(t, Math.max(0, completePathInformation - pathInformation(pathWithoutType)));
       }
-      
+
       const totalEffect = [...removalEffects.values()].reduce((s, e) => s + e, 0);
-      
       for (const e of sorted) {
-        // Distribute the type's removal effect equally among its occurrences
         const count = sorted.filter(x => x.type === e.type).length;
         const typeEffect = removalEffects.get(e.type) ?? 0;
         const pct = totalEffect === 0 ? (1 / n) : (typeEffect / count) / totalEffect;
-        
         results.push({ eventId: e.id, eventType: e.type, contributionScore: totalScore * pct, percentage: pct });
       }
       break;
     }
     case "shapley": {
-      // Simplified Shapley Value approximation
-      // Evaluating all 2^N subsets is too slow for large N, we use a deterministic heuristic
-      
-      // Assign intrinsic value to each event type based on a pseudo-random hash to make it deterministic but varied
-      const intrinsicValues = new Map<string, number>();
-      for (const e of sorted) {
-        if (!intrinsicValues.has(e.type)) {
-          let hash = 0;
-          for (let i = 0; i < e.type.length; i++) {
-            hash = ((hash << 5) - hash) + e.type.charCodeAt(i);
-          }
-          intrinsicValues.set(e.type, Math.abs(hash % 100) / 100.0);
-        }
-      }
-      
-      // Calculate marginal contributions (simplified)
-      const weights = sorted.map((e, idx) => {
-        const val = intrinsicValues.get(e.type) ?? 0.5;
-        // Position factor: events closer to the end get a slight boost in Shapley approximations for conversion
-        const posFactor = 1.0 + (idx / n) * 0.5; 
-        return val * posFactor;
-      });
-      
-      const totalWeight = weights.reduce((s, w) => s + w, 0);
-      
-      for (let i = 0; i < n; i++) {
-        const pct = totalWeight === 0 ? (1 / n) : weights[i]! / totalWeight;
-        results.push({ eventId: sorted[i]!.id, eventType: sorted[i]!.type, contributionScore: totalScore * pct, percentage: pct });
+      // For the event-type coverage game, each unique type has an equal Shapley
+      // value. Repeated observations split their type's value equally.
+      const occurrences = new Map<string, number>();
+      for (const event of sorted) occurrences.set(event.type, (occurrences.get(event.type) ?? 0) + 1);
+      const typeShare = 1 / occurrences.size;
+      for (const event of sorted) {
+        const pct = typeShare / occurrences.get(event.type)!;
+        results.push({ eventId: event.id, eventType: event.type, contributionScore: totalScore * pct, percentage: pct });
       }
       break;
     }

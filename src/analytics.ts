@@ -808,20 +808,20 @@ export function simulateABTest(
   variantLeads: readonly string[],
   config: ABTestConfig
 ): ABTestResult {
-  let controlMet = 0;
-  let variantMet = 0;
-  
-  if (config.targetMetric === "conversion_rate") {
-    controlMet = controlLeads.filter(id => state.leads[id]?.lifecycle === "converted").length / Math.max(1, controlLeads.length);
-    variantMet = variantLeads.filter(id => state.leads[id]?.lifecycle === "converted").length / Math.max(1, variantLeads.length);
-  } else if (config.targetMetric === "average_score") {
-    controlMet = controlLeads.reduce((s, id) => s + (state.scores[id] ?? 0), 0) / Math.max(1, controlLeads.length);
-    variantMet = variantLeads.reduce((s, id) => s + (state.scores[id] ?? 0), 0) / Math.max(1, variantLeads.length);
-  } else {
-    // event_velocity
-    controlMet = controlLeads.reduce((s, id) => s + (state.eventIdsByLead[id]?.length ?? 0), 0) / Math.max(1, controlLeads.length);
-    variantMet = variantLeads.reduce((s, id) => s + (state.eventIdsByLead[id]?.length ?? 0), 0) / Math.max(1, variantLeads.length);
-  }
+  const observations = (leadIds: readonly string[]): number[] => leadIds.map((id) => {
+    if (config.targetMetric === "conversion_rate") return state.leads[id]?.lifecycle === "converted" ? 1 : 0;
+    if (config.targetMetric === "average_score") return state.scores[id] ?? 0;
+    return state.eventIdsByLead[id]?.length ?? 0;
+  });
+  const mean = (values: readonly number[]): number => values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = (values: readonly number[], average: number): number => values.length < 2
+    ? 0
+    : values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1);
+
+  const controlValues = observations(controlLeads);
+  const variantValues = observations(variantLeads);
+  const controlMet = mean(controlValues);
+  const variantMet = mean(variantValues);
   
   const lift = controlMet === 0 ? 0 : (variantMet - controlMet) / controlMet;
   
@@ -831,25 +831,21 @@ export function simulateABTest(
   const n1 = controlLeads.length;
   const n2 = variantLeads.length;
   
-  let zScore = 0;
-  if (config.targetMetric === "conversion_rate") {
-    const pPool = (p1 * n1 + p2 * n2) / (n1 + n2);
-    const se = Math.sqrt(pPool * (1 - pPool) * (1/n1 + 1/n2));
-    zScore = se === 0 ? 0 : (p2 - p1) / se;
-  } else {
-    // For continuous metrics, we'd need variance. Assume standard dev = mean * 0.5 for mock
-    const v1 = Math.pow(p1 * 0.5, 2);
-    const v2 = Math.pow(p2 * 0.5, 2);
-    const se = Math.sqrt(v1/n1 + v2/n2);
-    zScore = se === 0 ? 0 : (p2 - p1) / se;
-  }
+  const controlVariance = variance(controlValues, controlMet);
+  const variantVariance = variance(variantValues, variantMet);
+  const standardError = Math.sqrt(
+    (n1 === 0 ? 0 : controlVariance / n1) +
+    (n2 === 0 ? 0 : variantVariance / n2),
+  );
+  const zScore = standardError === 0 ? 0 : (p2 - p1) / standardError;
   
   // 1.96 roughly equals 95% confidence
   const criticalValue = config.confidenceLevel >= 0.99 ? 2.576 : (config.confidenceLevel >= 0.95 ? 1.96 : 1.645);
   const isSig = Math.abs(zScore) >= criticalValue;
   
-  // Very rough p-value approximation for the two-tailed normal distribution
-  const pVal = Math.exp(-0.717 * zScore - 0.416 * zScore * zScore); 
+  // Deterministic two-tailed normal approximation based on |z|.
+  const absoluteZ = Math.abs(zScore);
+  const pVal = Math.exp(-0.717 * absoluteZ - 0.416 * absoluteZ * absoluteZ);
   
   return {
     controlSize: n1,
@@ -870,34 +866,23 @@ export interface BanditArm {
   readonly totalTrials: number;
 }
 
-export function epsilonGreedyAllocation(arms: readonly BanditArm[], epsilon: number): string {
-  // We can't use Math.random() for deterministic constraints.
-  // Instead, we will simulate a pseudo-random choice using a deterministic hash of the arm states.
-  let hash = 0;
-  for (const arm of arms) {
-    hash = ((hash << 5) - hash) + arm.successCount + arm.totalTrials;
+export function epsilonGreedyAllocation(arms: readonly BanditArm[], epsilon: number, explorationValue = 1): string {
+  if (arms.length === 0) throw new Error("at least one bandit arm is required");
+  if (!Number.isFinite(epsilon) || epsilon < 0 || epsilon > 1) throw new Error("epsilon must be in [0, 1]");
+  if (!Number.isFinite(explorationValue) || explorationValue < 0 || explorationValue > 1) throw new Error("explorationValue must be in [0, 1]");
+  if (arms.some((arm) => !arm.id.trim() || !Number.isInteger(arm.successCount) || !Number.isInteger(arm.totalTrials) || arm.successCount < 0 || arm.totalTrials < arm.successCount)) {
+    throw new Error("bandit arms require an id and valid non-negative trial counts");
   }
-  const pseudoRand = Math.abs(hash % 1000) / 1000;
-  
-  if (pseudoRand < epsilon) {
-    // Exploration: pick a 'random' arm based on another hash
-    const idx = Math.abs((hash * 31) % arms.length);
-    return arms[idx]!.id;
-  } else {
-    // Exploitation: pick best arm
-    let bestArm = arms[0]!;
-    let bestRate = bestArm.totalTrials === 0 ? 0 : bestArm.successCount / bestArm.totalTrials;
-    
-    for (let i = 1; i < arms.length; i++) {
-      const arm = arms[i]!;
-      const rate = arm.totalTrials === 0 ? 0 : arm.successCount / arm.totalTrials;
-      if (rate > bestRate) {
-        bestRate = rate;
-        bestArm = arm;
-      }
-    }
-    return bestArm.id;
+
+  if (explorationValue < epsilon) {
+    return [...arms].sort((left, right) => left.totalTrials - right.totalTrials || left.id.localeCompare(right.id))[0]!.id;
   }
+
+  return [...arms].sort((left, right) => {
+    const leftRate = left.totalTrials === 0 ? 0 : left.successCount / left.totalTrials;
+    const rightRate = right.totalTrials === 0 ? 0 : right.successCount / right.totalTrials;
+    return rightRate - leftRate || left.id.localeCompare(right.id);
+  })[0]!.id;
 }
 
 // --- Marketing Mix Modeling (MMM) Simulation ---
