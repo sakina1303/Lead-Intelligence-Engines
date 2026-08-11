@@ -110,32 +110,34 @@ export function mergeEngineConfigs(base: EngineConfig, override: Partial<EngineC
 
 // --- Config Migration ---
 
-export function migrateConfigV1ToV2(v1Config: any): Outcome<EngineConfig> {
+export function migrateConfigV1ToV2(v1Config: unknown): Outcome<EngineConfig> {
   try {
+    const source = typeof v1Config === "object" && v1Config !== null ? v1Config as Readonly<Record<string, unknown>> : {};
     const config = {
       scorePolicy: {
-        cap: typeof v1Config?.maxScore === "number" ? v1Config.maxScore : 1000,
-        floor: typeof v1Config?.minScore === "number" ? v1Config.minScore : 0,
+        cap: typeof source["maxScore"] === "number" ? source["maxScore"] : 1000,
+        floor: typeof source["minScore"] === "number" ? source["minScore"] : 0,
         conflictMode: "stack" as const,
       },
       qualificationPolicies: [] as import("./contracts.js").QualificationPolicy[],
       segmentPolicy: { fallback: "default", rules: [] as import("./contracts.js").SegmentRule[] },
     };
     
-    if (Array.isArray(v1Config?.thresholds)) {
-      for (const t of v1Config.thresholds) {
-        if (typeof t.name === "string" && typeof t.value === "number") {
+    if (Array.isArray(source["thresholds"])) {
+      for (const candidate of source["thresholds"]) {
+        const threshold = typeof candidate === "object" && candidate !== null ? candidate as Readonly<Record<string, unknown>> : {};
+        if (typeof threshold["name"] === "string" && typeof threshold["value"] === "number") {
           config.qualificationPolicies = [...config.qualificationPolicies, {
-            id: `qual-${t.name.toLowerCase().replace(/\s+/g, "-")}`,
+            id: `qual-${threshold["name"].toLowerCase().replace(/\s+/g, "-")}`,
             qualification: "marketing-qualified",
-            minimumScore: t.value,
+            minimumScore: threshold["value"],
           }];
         }
       }
     }
     
     return validateEngineConfig(config);
-  } catch (e) {
+  } catch {
     return failure("migration failed due to invalid v1 format");
   }
 }
@@ -211,4 +213,3 @@ export const defaultSaaSEngineConfig = new EngineConfigBuilder()
     requiredAttributes: [{ key: "company_size", equals: "1000+" }]
   })
   .buildUnsafe();
-

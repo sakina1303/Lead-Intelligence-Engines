@@ -14,9 +14,9 @@ export interface UnaryExpressionNode extends ASTNode { type: "UnaryExpression"; 
 export interface MemberExpressionNode extends ASTNode { type: "MemberExpression"; object: ASTNode; property: ASTNode; computed: boolean; }
 export interface ArrayExpressionNode extends ASTNode { type: "ArrayExpression"; elements: ASTNode[]; }
 
-export type EvaluationContext = Readonly<Record<string, any>>;
+export type EvaluationContext = Readonly<Record<string, unknown>>;
 
-export function evaluateAST(node: ASTNode, context: EvaluationContext): any {
+export function evaluateAST(node: ASTNode, context: EvaluationContext): unknown {
   if (!node) return null;
   switch (node.type) {
     case "Literal": return (node as LiteralNode).value;
@@ -66,12 +66,13 @@ export function evaluateAST(node: ASTNode, context: EvaluationContext): any {
     case "MemberExpression": {
         const memNode = node as MemberExpressionNode;
         const obj = evaluateAST(memNode.object, context);
-        if (!obj || typeof obj !== 'object') return undefined;
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return undefined;
+        const record = obj as Readonly<Record<string, unknown>>;
         if (memNode.computed) {
             const prop = evaluateAST(memNode.property, context);
-            return obj[prop];
+            return typeof prop === "string" || typeof prop === "number" ? record[String(prop)] : undefined;
         } else {
-            if (memNode.property.type === "Identifier") return obj[(memNode.property as IdentifierNode).name];
+            if (memNode.property.type === "Identifier") return record[(memNode.property as IdentifierNode).name];
             return undefined;
         }
     }
@@ -442,7 +443,10 @@ export function partialEvaluateAST(node: ASTNode, context: EvaluationContext): P
       const id = node as IdentifierNode;
       if (Object.prototype.hasOwnProperty.call(context, id.name)) {
         const val = context[id.name];
-        return { isResolved: true, value: val, residual: { type: "Literal", value: val as string | number | boolean | null } as LiteralNode };
+        if (val === null || typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
+          return { isResolved: true, value: val, residual: { type: "Literal", value: val } as LiteralNode };
+        }
+        return { isResolved: false, value: val, residual: node };
       }
       return { isResolved: false, value: undefined, residual: node };
     }

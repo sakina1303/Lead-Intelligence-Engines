@@ -599,7 +599,7 @@ export interface NodeState {
   readonly role: NodeRole;
   readonly currentTerm: number;
   readonly votedFor: string | null;
-  readonly log: readonly { readonly term: number; readonly command: any }[];
+  readonly log: readonly { readonly term: number; readonly command: unknown }[];
   readonly commitIndex: number;
   readonly lastApplied: number;
 }
@@ -616,7 +616,7 @@ export type NetworkEvent =
   | { type: "timer_tick"; now: number; randomEntropy: number } // randomEntropy [0,1] used deterministically
   | { type: "request_vote"; term: number; candidateId: string; lastLogIndex: number; lastLogTerm: number }
   | { type: "vote_reply"; term: number; voteGranted: boolean; fromNodeId: string }
-  | { type: "append_entries"; term: number; leaderId: string; prevLogIndex: number; prevLogTerm: number; entries: readonly any[]; leaderCommit: number }
+  | { type: "append_entries"; term: number; leaderId: string; prevLogIndex: number; prevLogTerm: number; entries: readonly { readonly term: number; readonly command: unknown }[]; leaderCommit: number }
   | { type: "append_reply"; term: number; success: boolean; matchIndex: number; fromNodeId: string };
 
 export function processConsensusEvent(
