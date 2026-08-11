@@ -1,19 +1,81 @@
 import type { DomainEvent, Outcome } from "../contracts.js";
 import { failure, success } from "../validation.js";
 
-export interface DomainEventPayload { readonly kind: string; }
-export interface PageViewPayload extends DomainEventPayload { readonly kind: "page-view"; readonly url: string; readonly referrer?: string; readonly utmSource?: string; readonly utmMedium?: string; readonly utmCampaign?: string; readonly durationMs?: number; }
-export interface FormSubmitPayload extends DomainEventPayload { readonly kind: "form-submit"; readonly formId: string; readonly submissionData: Readonly<Record<string, string | boolean | number>>; readonly ipAddress?: string; }
-export interface EmailOpenPayload extends DomainEventPayload { readonly kind: "email-open"; readonly campaignId: string; readonly messageId: string; readonly client?: string; readonly deviceType?: "mobile" | "desktop" | "tablet" | "unknown"; }
-export interface EmailClickPayload extends DomainEventPayload { readonly kind: "email-click"; readonly campaignId: string; readonly messageId: string; readonly linkUrl: string; }
-export interface WebinarRegisterPayload extends DomainEventPayload { readonly kind: "webinar-register"; readonly webinarId: string; readonly title: string; readonly role?: string; }
-export interface WebinarAttendPayload extends DomainEventPayload { readonly kind: "webinar-attend"; readonly webinarId: string; readonly durationMinutes: number; readonly pollResponses?: Readonly<Record<string, string>>; }
-export interface DemoRequestPayload extends DomainEventPayload { readonly kind: "demo-request"; readonly requestedDate: string; readonly comments?: string; readonly useCase?: string; }
-export interface ContractSignedPayload extends DomainEventPayload { readonly kind: "contract-signed"; readonly contractId: string; readonly valueCents: number; readonly termMonths: number; }
-export interface SupportTicketOpenedPayload extends DomainEventPayload { readonly kind: "support-ticket-opened"; readonly ticketId: string; readonly severity: "low" | "medium" | "high" | "critical"; readonly category: string; }
+export interface DomainEventPayload {
+  readonly kind: string;
+}
+
+export interface PageViewPayload extends DomainEventPayload {
+  readonly kind: "page-view";
+  readonly url: string;
+  readonly referrer?: string;
+  readonly utmSource?: string;
+  readonly utmMedium?: string;
+  readonly utmCampaign?: string;
+  readonly durationMs?: number;
+}
+
+export interface FormSubmitPayload extends DomainEventPayload {
+  readonly kind: "form-submit";
+  readonly formId: string;
+  readonly submissionData: Readonly<Record<string, string | boolean | number>>;
+  readonly ipAddress?: string;
+}
+
+export interface EmailOpenPayload extends DomainEventPayload {
+  readonly kind: "email-open";
+  readonly campaignId: string;
+  readonly messageId: string;
+  readonly client?: string;
+  readonly deviceType?: "mobile" | "desktop" | "tablet" | "unknown";
+}
+
+export interface EmailClickPayload extends DomainEventPayload {
+  readonly kind: "email-click";
+  readonly campaignId: string;
+  readonly messageId: string;
+  readonly linkUrl: string;
+}
+
+export interface WebinarRegisterPayload extends DomainEventPayload {
+  readonly kind: "webinar-register";
+  readonly webinarId: string;
+  readonly title: string;
+  readonly role?: string;
+}
+
+export interface WebinarAttendPayload extends DomainEventPayload {
+  readonly kind: "webinar-attend";
+  readonly webinarId: string;
+  readonly durationMinutes: number;
+  readonly pollResponses?: Readonly<Record<string, string>>;
+}
+
+export interface DemoRequestPayload extends DomainEventPayload {
+  readonly kind: "demo-request";
+  readonly requestedDate: string;
+  readonly comments?: string;
+  readonly useCase?: string;
+}
+
+export interface ContractSignedPayload extends DomainEventPayload {
+  readonly kind: "contract-signed";
+  readonly contractId: string;
+  readonly valueCents: number;
+  readonly termMonths: number;
+}
+
+export interface SupportTicketOpenedPayload extends DomainEventPayload {
+  readonly kind: "support-ticket-opened";
+  readonly ticketId: string;
+  readonly severity: "low" | "medium" | "high" | "critical";
+  readonly category: string;
+}
 
 export type TypedDomainEventPayload = PageViewPayload | FormSubmitPayload | EmailOpenPayload | EmailClickPayload | WebinarRegisterPayload | WebinarAttendPayload | DemoRequestPayload | ContractSignedPayload | SupportTicketOpenedPayload;
-export interface TypedDomainEvent extends DomainEvent { readonly payload?: TypedDomainEventPayload; }
+export interface TypedDomainEvent extends DomainEvent {
+  readonly payload?: TypedDomainEventPayload;
+}
 
 export function validateEventPayload(payload: TypedDomainEventPayload): Outcome<TypedDomainEventPayload> {
   const errors: string[] = [];
