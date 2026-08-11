@@ -7,6 +7,7 @@ import {
   eventLedger,
   events,
   intelligenceModels,
+  intelligence,
   leadHistory,
   leadProfiles,
   qualification,
@@ -37,6 +38,7 @@ describe("package-root domain namespaces", () => {
     [analytics, "summarize"],
     [simulations, "evaluateWhatIfScenario"],
     [intelligenceModels, "buildMarkovConversionModel"],
+    [intelligence, "evaluateLeadIntelligence"],
     [stateSnapshots, "serializeAndCompressState"],
   ])("exposes %s through the package root", (namespace, capability) => {
     expect(namespace).toHaveProperty(capability);

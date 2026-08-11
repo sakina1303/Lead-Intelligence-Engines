@@ -1,7 +1,252 @@
-import type { EngineState, Lead } from "./contracts.js";
+import type { DomainEvent, EngineState, Lead, Outcome } from "./contracts.js";
 import { getLeadEvents } from "./event-ledger.js";
 
 // Deterministic, state-derived models for lead intelligence.
+
+export type LeadSignalKind =
+  | "increasing-engagement"
+  | "declining-engagement"
+  | "high-intent"
+  | "stale-activity"
+  | "rapid-progression"
+  | "repeated-decision-behavior"
+  | "strong-fit-low-engagement"
+  | "strong-engagement-weak-fit"
+  | "qualification-risk"
+  | "opportunity-acceleration"
+  | "behavioral-concentration";
+
+export interface LeadSignalEvidence {
+  readonly metric: string;
+  readonly actual: number;
+  readonly threshold: number;
+  readonly eventIds: readonly string[];
+  readonly explanation: string;
+}
+
+export interface LeadIntelligenceSignal {
+  readonly kind: LeadSignalKind;
+  readonly disposition: "opportunity" | "risk" | "observation";
+  readonly strength: number;
+  readonly evidence: LeadSignalEvidence;
+}
+
+export interface LeadSignalPolicy {
+  readonly evaluatedAt: number;
+  readonly recentWindowMs: number;
+  readonly comparisonWindowMs: number;
+  readonly staleAfterMs: number;
+  readonly highIntentEventTypes: readonly string[];
+  readonly decisionEventTypes: readonly string[];
+  readonly highIntentMinimum: number;
+  readonly repeatedDecisionMinimum: number;
+  readonly engagementChangeRatio: number;
+  readonly concentrationRatio: number;
+  readonly rapidProgressionMs: number;
+  readonly fitDimension: string;
+  readonly engagementDimension: string;
+  readonly strongDimensionThreshold: number;
+  readonly weakDimensionThreshold: number;
+}
+
+export interface LeadIntelligenceReport {
+  readonly leadId: string;
+  readonly evaluatedAt: number;
+  readonly recentWindowStart: number;
+  readonly comparisonWindowStart: number;
+  readonly signals: readonly LeadIntelligenceSignal[];
+}
+
+function signalPolicyErrors(policy: LeadSignalPolicy): string[] {
+  const errors: string[] = [];
+  const positiveDurations: readonly [string, number][] = [
+    ["recentWindowMs", policy.recentWindowMs],
+    ["comparisonWindowMs", policy.comparisonWindowMs],
+    ["staleAfterMs", policy.staleAfterMs],
+    ["rapidProgressionMs", policy.rapidProgressionMs],
+  ];
+  for (const [name, value] of positiveDurations) {
+    if (!Number.isFinite(value) || value <= 0) errors.push(`${name} must be a positive finite number`);
+  }
+  const nonNegativeCounts: readonly [string, number][] = [
+    ["highIntentMinimum", policy.highIntentMinimum],
+    ["repeatedDecisionMinimum", policy.repeatedDecisionMinimum],
+  ];
+  for (const [name, value] of nonNegativeCounts) {
+    if (!Number.isInteger(value) || value < 1) errors.push(`${name} must be a positive integer`);
+  }
+  if (!Number.isFinite(policy.evaluatedAt)) errors.push("evaluatedAt must be finite");
+  if (!Number.isFinite(policy.engagementChangeRatio) || policy.engagementChangeRatio <= 1) errors.push("engagementChangeRatio must be greater than 1");
+  if (!Number.isFinite(policy.concentrationRatio) || policy.concentrationRatio <= 0 || policy.concentrationRatio > 1) errors.push("concentrationRatio must be in (0, 1]");
+  if (!policy.fitDimension.trim()) errors.push("fitDimension is required");
+  if (!policy.engagementDimension.trim()) errors.push("engagementDimension is required");
+  if (!Number.isFinite(policy.strongDimensionThreshold)) errors.push("strongDimensionThreshold must be finite");
+  if (!Number.isFinite(policy.weakDimensionThreshold)) errors.push("weakDimensionThreshold must be finite");
+  return errors;
+}
+
+function strength(actual: number, threshold: number): number {
+  if (threshold <= 0) return actual > 0 ? 1 : 0;
+  return Math.min(1, Math.max(0, actual / threshold));
+}
+
+function evidence(
+  metric: string,
+  actual: number,
+  threshold: number,
+  events: readonly DomainEvent[],
+  explanation: string,
+): LeadSignalEvidence {
+  return { metric, actual, threshold, eventIds: events.map((event) => event.id), explanation };
+}
+
+export function evaluateLeadIntelligence(
+  state: EngineState,
+  leadId: string,
+  policy: LeadSignalPolicy,
+): Outcome<LeadIntelligenceReport> {
+  const errors = signalPolicyErrors(policy);
+  const lead = state.leads[leadId];
+  if (!lead) errors.push(`lead ${leadId} does not exist`);
+  if (errors.length > 0 || !lead) return { ok: false, errors };
+
+  const allEvents = getLeadEvents(state, leadId).filter((event) => event.occurredAt <= policy.evaluatedAt);
+  const recentStart = policy.evaluatedAt - policy.recentWindowMs;
+  const comparisonStart = recentStart - policy.comparisonWindowMs;
+  const recent = allEvents.filter((event) => event.occurredAt >= recentStart);
+  const previous = allEvents.filter((event) => event.occurredAt >= comparisonStart && event.occurredAt < recentStart);
+  const signals: LeadIntelligenceSignal[] = [];
+
+  const normalizedRecentRate = recent.length / policy.recentWindowMs;
+  const normalizedPreviousRate = previous.length / policy.comparisonWindowMs;
+  const increasing = normalizedRecentRate > normalizedPreviousRate * policy.engagementChangeRatio && recent.length > 0;
+  const declining = normalizedPreviousRate > normalizedRecentRate * policy.engagementChangeRatio && previous.length > 0;
+
+  if (increasing) {
+    const ratio = normalizedPreviousRate === 0 ? policy.engagementChangeRatio : normalizedRecentRate / normalizedPreviousRate;
+    signals.push({
+      kind: "increasing-engagement",
+      disposition: "opportunity",
+      strength: strength(ratio, policy.engagementChangeRatio),
+      evidence: evidence("engagement-rate-ratio", ratio, policy.engagementChangeRatio, recent, "recent event frequency exceeds the comparison window"),
+    });
+  }
+
+  if (declining) {
+    const ratio = normalizedRecentRate === 0 ? policy.engagementChangeRatio : normalizedPreviousRate / normalizedRecentRate;
+    signals.push({
+      kind: "declining-engagement",
+      disposition: "risk",
+      strength: strength(ratio, policy.engagementChangeRatio),
+      evidence: evidence("engagement-decline-ratio", ratio, policy.engagementChangeRatio, previous, "recent event frequency is below the comparison window"),
+    });
+  }
+
+  const highIntent = recent.filter((event) => policy.highIntentEventTypes.includes(event.type));
+  if (highIntent.length >= policy.highIntentMinimum) {
+    signals.push({
+      kind: "high-intent",
+      disposition: "opportunity",
+      strength: strength(highIntent.length, policy.highIntentMinimum),
+      evidence: evidence("high-intent-event-count", highIntent.length, policy.highIntentMinimum, highIntent, "high-intent event threshold was reached"),
+    });
+  }
+
+  const latest = allEvents.at(-1);
+  const inactiveFor = latest ? policy.evaluatedAt - latest.occurredAt : policy.evaluatedAt - lead.createdAt;
+  if (inactiveFor >= policy.staleAfterMs) {
+    signals.push({
+      kind: "stale-activity",
+      disposition: "risk",
+      strength: strength(inactiveFor, policy.staleAfterMs),
+      evidence: evidence("inactive-duration-ms", inactiveFor, policy.staleAfterMs, latest ? [latest] : [], "no lead activity occurred within the freshness threshold"),
+    });
+  }
+
+  const decisionEvents = recent.filter((event) => policy.decisionEventTypes.includes(event.type));
+  if (decisionEvents.length >= policy.repeatedDecisionMinimum) {
+    signals.push({
+      kind: "repeated-decision-behavior",
+      disposition: "opportunity",
+      strength: strength(decisionEvents.length, policy.repeatedDecisionMinimum),
+      evidence: evidence("decision-event-count", decisionEvents.length, policy.repeatedDecisionMinimum, decisionEvents, "decision-stage behavior repeated within the recent window"),
+    });
+  }
+
+  const lifecycleChanges = (state.leadHistory[leadId] ?? [])
+    .filter((change) => change.kind === "lifecycle-transitioned" && change.occurredAt <= policy.evaluatedAt)
+    .sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || left.id.localeCompare(right.id));
+  const firstLifecycleChange = lifecycleChanges[0];
+  const lastLifecycleChange = lifecycleChanges.at(-1);
+  const progressionDuration = firstLifecycleChange && lastLifecycleChange
+    ? lastLifecycleChange.occurredAt - firstLifecycleChange.occurredAt
+    : Number.POSITIVE_INFINITY;
+  if (lifecycleChanges.length >= 2 && progressionDuration <= policy.rapidProgressionMs) {
+    signals.push({
+      kind: "rapid-progression",
+      disposition: "opportunity",
+      strength: 1 - Math.min(1, progressionDuration / policy.rapidProgressionMs),
+      evidence: evidence("lifecycle-progression-ms", progressionDuration, policy.rapidProgressionMs, [], "multiple lifecycle transitions completed within the progression threshold"),
+    });
+  }
+
+  const dimensions = state.scoreProjections[leadId]?.dimensions ?? {};
+  const fit = dimensions[policy.fitDimension] ?? 0;
+  const engagement = dimensions[policy.engagementDimension] ?? 0;
+  if (fit >= policy.strongDimensionThreshold && engagement <= policy.weakDimensionThreshold) {
+    signals.push({
+      kind: "strong-fit-low-engagement",
+      disposition: "observation",
+      strength: strength(fit, policy.strongDimensionThreshold),
+      evidence: evidence("fit-dimension", fit, policy.strongDimensionThreshold, recent, "fit is strong while engagement remains weak"),
+    });
+  }
+  if (engagement >= policy.strongDimensionThreshold && fit <= policy.weakDimensionThreshold) {
+    signals.push({
+      kind: "strong-engagement-weak-fit",
+      disposition: "observation",
+      strength: strength(engagement, policy.strongDimensionThreshold),
+      evidence: evidence("engagement-dimension", engagement, policy.strongDimensionThreshold, recent, "engagement is strong while fit remains weak"),
+    });
+  }
+
+  const qualification = state.qualifications[leadId]?.state;
+  if (declining && (qualification === "marketing-qualified" || qualification === "sales-qualified")) {
+    signals.push({
+      kind: "qualification-risk",
+      disposition: "risk",
+      strength: 1,
+      evidence: evidence("qualified-lead-recent-events", recent.length, previous.length, recent, "a qualified lead has materially declining engagement"),
+    });
+  }
+  if (increasing && highIntent.length >= policy.highIntentMinimum) {
+    signals.push({
+      kind: "opportunity-acceleration",
+      disposition: "opportunity",
+      strength: 1,
+      evidence: evidence("accelerating-high-intent-events", highIntent.length, policy.highIntentMinimum, highIntent, "engagement acceleration includes sufficient high-intent behavior"),
+    });
+  }
+
+  const categoryCounts = new Map<string, number>();
+  for (const event of recent) categoryCounts.set(event.category, (categoryCounts.get(event.category) ?? 0) + 1);
+  const dominantCategoryCount = Math.max(0, ...categoryCounts.values());
+  const concentration = recent.length === 0 ? 0 : dominantCategoryCount / recent.length;
+  if (recent.length > 1 && concentration >= policy.concentrationRatio) {
+    const concentratedEvents = recent.filter((event) => (categoryCounts.get(event.category) ?? 0) === dominantCategoryCount);
+    signals.push({
+      kind: "behavioral-concentration",
+      disposition: "observation",
+      strength: concentration,
+      evidence: evidence("dominant-category-ratio", concentration, policy.concentrationRatio, concentratedEvents, "recent behavior is concentrated in one event category"),
+    });
+  }
+
+  return {
+    ok: true,
+    value: { leadId, evaluatedAt: policy.evaluatedAt, recentWindowStart: recentStart, comparisonWindowStart: comparisonStart, signals },
+  };
+}
 
 export interface Vector {
   [dimension: string]: number;

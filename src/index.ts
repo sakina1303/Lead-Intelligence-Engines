@@ -13,7 +13,7 @@ export { calibrateThresholds, clampScore, scoreEvent, scoreForLead, scoreProject
 export { evaluateQualification } from "./qualification.js";
 export { assignSegment } from "./segmentation.js";
 export { rankLeads } from "./ranking.js";
-export * from "./machine-learning.js";
+export * from "./intelligence.js";
 export { analyzeEventCohortRetention, compareEventWindows, correlateScoreWithEvents, summarize } from "./analytics.js";
 export { evaluateWhatIfScenario, replayLeadScoring, runShadowPolicyExecution } from "./replay.js";
 
@@ -32,5 +32,6 @@ export * as segmentation from "./segmentation.js";
 export * as ranking from "./ranking.js";
 export * as analytics from "./analytics.js";
 export * as simulations from "./replay.js";
-export * as intelligenceModels from "./machine-learning.js";
+export * as intelligence from "./intelligence.js";
+export * as intelligenceModels from "./intelligence.js";
 export * as stateSnapshots from "./state.js";
