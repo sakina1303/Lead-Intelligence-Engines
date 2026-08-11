@@ -1,4 +1,4 @@
-import type { DomainEvent, EngineState, Lead, Outcome } from "./contracts.js";
+import type { DomainEvent, EngineState, Lead, LifecycleState, Outcome } from "./contracts.js";
 import { getLeadEvents } from "./event-ledger.js";
 
 // Deterministic, state-derived models for lead intelligence.
@@ -662,28 +662,32 @@ export function predictEventVolumeTrend(state: EngineState, leadId: string, inte
 
 // 6. Markov Chain Lead Lifecycle Transitions
 export interface TransitionMatrix {
-  readonly states: readonly string[];
+  readonly states: readonly LifecycleState[];
   readonly matrix: readonly (readonly number[])[];
 }
 
 export function buildLifecycleMarkovChain(state: EngineState): TransitionMatrix {
-  const transitions = new Map<string, Map<string, number>>();
-  const statesSet = new Set<string>();
-  
-  for (const lead of Object.values(state.leads)) {
-    // In a real system, we'd look at audit log / history for state transitions.
-    // Here we'll simulate by assuming creation -> current lifecycle.
-    statesSet.add("new");
-    statesSet.add(lead.lifecycle);
-    
-    if (lead.lifecycle !== "new") {
-      if (!transitions.has("new")) transitions.set("new", new Map());
-      const map = transitions.get("new")!;
-      map.set(lead.lifecycle, (map.get(lead.lifecycle) ?? 0) + 1);
+  const lifecycleStates: readonly LifecycleState[] = ["new", "contacted", "nurturing", "qualified", "converted", "rejected"];
+  const isLifecycleState = (value: unknown): value is LifecycleState => typeof value === "string" && lifecycleStates.includes(value as LifecycleState);
+  const transitions = new Map<LifecycleState, Map<LifecycleState, number>>();
+  const statesSet = new Set<LifecycleState>(Object.values(state.leads).map((lead) => lead.lifecycle));
+
+  for (const changes of Object.values(state.leadHistory)) {
+    const ordered = [...changes].sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || left.id.localeCompare(right.id));
+    for (const change of ordered) {
+      if (change.kind !== "lifecycle-transitioned") continue;
+      const from = change.previous["lifecycle"];
+      const to = change.next["lifecycle"];
+      if (!isLifecycleState(from) || !isLifecycleState(to)) continue;
+      statesSet.add(from);
+      statesSet.add(to);
+      const departures = transitions.get(from) ?? new Map<LifecycleState, number>();
+      departures.set(to, (departures.get(to) ?? 0) + 1);
+      transitions.set(from, departures);
     }
   }
-  
-  const states = [...statesSet].sort();
+
+  const states = lifecycleStates.filter((lifecycle) => statesSet.has(lifecycle));
   const matrix: number[][] = [];
   
   for (let i = 0; i < states.length; i++) {
@@ -692,8 +696,7 @@ export function buildLifecycleMarkovChain(state: EngineState): TransitionMatrix 
     
     const fromState = states[i]!;
     const map = transitions.get(fromState);
-    if (!map) {
-      // Absorbing state (100% chance to stay)
+    if (!map || map.size === 0) {
       row[i] = 1.0;
       continue;
     }
@@ -703,13 +706,9 @@ export function buildLifecycleMarkovChain(state: EngineState): TransitionMatrix 
       total += count;
     }
     
-    if (total === 0) {
-      row[i] = 1.0;
-    } else {
-      for (const [toState, count] of map.entries()) {
-        const j = states.indexOf(toState);
-        row[j] = count / total;
-      }
+    for (const [toState, count] of map.entries()) {
+      const j = states.indexOf(toState);
+      if (j >= 0) row[j] = count / total;
     }
   }
   

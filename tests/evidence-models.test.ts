@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { DomainEvent, EngineState } from "../src/index.js";
-import { analytics, scoreProjections } from "../src/index.js";
+import { analytics, intelligence, scoreProjections } from "../src/index.js";
 
 function event(id: string, type: string, occurredAt: number, sequence: number): DomainEvent {
   return { id, leadId: "lead-1", type, category: "engagement", occurredAt, sequence, attributes: {} };
@@ -81,5 +81,38 @@ describe("deterministic experiment decisions", () => {
     [[{ id: "a", successCount: 1, totalTrials: 1 }], 0.1, -1, "explorationValue must be in [0, 1]"],
   ] as const)("rejects invalid allocation inputs %#", (arms, epsilon, explorationValue, error) => {
     expect(() => analytics.epsilonGreedyAllocation(arms, epsilon, explorationValue)).toThrow(error);
+  });
+});
+
+describe("historical lifecycle models", () => {
+  test("derives transition probabilities from recorded lifecycle evidence", () => {
+    const state = experimentState();
+    const historical: EngineState = {
+      ...state,
+      leads: {
+        ...state.leads,
+        c1: { ...state.leads["c1"]!, lifecycle: "qualified" },
+        c2: { ...state.leads["c2"]!, lifecycle: "converted" },
+      },
+      leadHistory: {
+        c1: [{ id: "h1", leadId: "c1", kind: "lifecycle-transitioned", occurredAt: 10, sequence: 1, previous: { lifecycle: "new" }, next: { lifecycle: "qualified" }, reason: "qualified" }],
+        c2: [
+          { id: "h2", leadId: "c2", kind: "lifecycle-transitioned", occurredAt: 10, sequence: 1, previous: { lifecycle: "new" }, next: { lifecycle: "contacted" }, reason: "contacted" },
+          { id: "h3", leadId: "c2", kind: "lifecycle-transitioned", occurredAt: 20, sequence: 2, previous: { lifecycle: "contacted" }, next: { lifecycle: "converted" }, reason: "converted" },
+        ],
+      },
+    };
+
+    const model = intelligence.buildLifecycleMarkovChain(historical);
+    const newRow = model.matrix[model.states.indexOf("new")]!;
+    expect(newRow[model.states.indexOf("contacted")]).toBe(0.5);
+    expect(newRow[model.states.indexOf("qualified")]).toBe(0.5);
+    expect(model.matrix[model.states.indexOf("contacted")]?.[model.states.indexOf("converted")]).toBe(1);
+  });
+
+  test("treats observed states without departures as absorbing", () => {
+    const model = intelligence.buildLifecycleMarkovChain(experimentState());
+    const newIndex = model.states.indexOf("new");
+    expect(model.matrix[newIndex]?.[newIndex]).toBe(1);
   });
 });
