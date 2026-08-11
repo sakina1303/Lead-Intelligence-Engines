@@ -90,4 +90,20 @@ describe("deterministic state snapshots", () => {
       "snapshot payload is not valid base64-encoded JSON",
     );
   });
+
+  test("state proofs cover event attributes and full engine projections", () => {
+    const state = populatedState();
+    const original = stateSnapshots.computeStateHash(state);
+    const changed: EngineState = {
+      ...state,
+      events: { ...state.events, "event-1": { ...state.events["event-1"]!, attributes: { plan: "starter" } } },
+    };
+    expect(stateSnapshots.computeStateHash(changed)).not.toBe(original);
+  });
+
+  test("generic digests are stable across record insertion order", () => {
+    expect(stateSnapshots.computeDeterministicDigest({ alpha: 1, beta: 2 })).toBe(
+      stateSnapshots.computeDeterministicDigest({ beta: 2, alpha: 1 }),
+    );
+  });
 });

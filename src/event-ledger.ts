@@ -1,5 +1,6 @@
 import type { CreateEventInput, DomainEvent, EngineState, EventCategory, Outcome, Timestamp } from "./contracts.js";
 import { compareEvents, createEvent } from "./events.js";
+import { computeDeterministicDigest, computeStateHash } from "./state.js";
 import { failure, success } from "./validation.js";
 
 export interface EventQuery {
@@ -509,63 +510,34 @@ export interface StateProof {
   readonly merkleRoot: string;
 }
 
-function sha256Mock(input: string): string {
-  // A deterministic, pure mock for a hash function to maintain strict purity/no-crypto constraints
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = ((hash << 5) - hash) + input.charCodeAt(i);
-    hash |= 0; // Convert to 32bit integer
-  }
-  // Convert to hex-like string, padded
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
 export function generateStateProof(state: EngineState, timestamp: number): StateProof {
+  if (!Number.isFinite(timestamp)) throw new Error("state proof timestamp must be finite");
   const leadIds = Object.keys(state.leads).sort();
   const eventIds = Object.keys(state.events).sort();
-  
-  let totalScore = 0;
-  const leadHashes: string[] = [];
-  
-  for (const id of leadIds) {
-    totalScore += state.scores[id] ?? 0;
-    const lead = state.leads[id]!;
-    const h = sha256Mock(`${lead.id}|${lead.email}|${lead.lifecycle}|${lead.updatedAt}`);
-    leadHashes.push(h);
-  }
-  
-  const eventHashes: string[] = [];
-  for (const id of eventIds) {
-    const e = state.events[id]!;
-    const h = sha256Mock(`${e.id}|${e.leadId}|${e.type}|${e.occurredAt}`);
-    eventHashes.push(h);
-  }
-  
-  // Build a naive Merkle Tree root for leads
-  let currentLayer = [...leadHashes];
+
+  const totalScore = leadIds.reduce((sum, leadId) => sum + (state.scores[leadId] ?? 0), 0);
+  const entityDigests = [
+    ...leadIds.map((leadId) => computeDeterministicDigest({ entity: "lead", value: state.leads[leadId] })),
+    ...eventIds.map((eventId) => computeDeterministicDigest({ entity: "event", value: state.events[eventId] })),
+  ];
+
+  let currentLayer = entityDigests;
   while (currentLayer.length > 1) {
     const nextLayer: string[] = [];
     for (let i = 0; i < currentLayer.length; i += 2) {
-      if (i + 1 < currentLayer.length) {
-        nextLayer.push(sha256Mock(currentLayer[i]! + currentLayer[i + 1]!));
-      } else {
-        nextLayer.push(currentLayer[i]!); // Odd one out
-      }
+      const left = currentLayer[i]!;
+      const right = currentLayer[i + 1] ?? left;
+      nextLayer.push(computeDeterministicDigest([left, right]));
     }
     currentLayer = nextLayer;
   }
-  
-  const leadRoot = currentLayer.length > 0 ? currentLayer[0]! : "empty";
-  
-  // Global state hash
-  const stateHash = sha256Mock(`${leadRoot}|${totalScore}|${eventIds.length}|${timestamp}`);
-  
+
   return {
-    stateHash,
+    stateHash: computeStateHash(state),
     leadCount: leadIds.length,
     eventCount: eventIds.length,
     totalScore,
     generatedAt: timestamp,
-    merkleRoot: leadRoot
+    merkleRoot: currentLayer[0] ?? computeDeterministicDigest([]),
   };
 }

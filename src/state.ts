@@ -56,8 +56,8 @@ function canonicalize(value: unknown): string {
   throw new Error(`state contains an unsupported ${typeof value} value`);
 }
 
-export function computeStateHash(state: EngineState): string {
-  const canonicalState = canonicalize(state);
+export function computeDeterministicDigest(value: unknown): string {
+  const canonicalState = canonicalize(value);
   let hash = 2166136261;
 
   for (let index = 0; index < canonicalState.length; index += 1) {
@@ -66,6 +66,10 @@ export function computeStateHash(state: EngineState): string {
   }
 
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function computeStateHash(state: EngineState): string {
+  return computeDeterministicDigest(state);
 }
 
 // --- Differential State Merging ---
