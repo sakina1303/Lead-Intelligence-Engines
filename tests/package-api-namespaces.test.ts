@@ -16,6 +16,7 @@ import {
   scoreProjections,
   segmentation,
   simulations,
+  stateSnapshots,
 } from "../src/index.js";
 
 describe("package-root domain namespaces", () => {
@@ -36,6 +37,7 @@ describe("package-root domain namespaces", () => {
     [analytics, "summarize"],
     [simulations, "evaluateWhatIfScenario"],
     [intelligenceModels, "buildMarkovConversionModel"],
+    [stateSnapshots, "serializeAndCompressState"],
   ])("exposes %s through the package root", (namespace, capability) => {
     expect(namespace).toHaveProperty(capability);
     expect(namespace[capability as keyof typeof namespace]).toBeTypeOf("function");

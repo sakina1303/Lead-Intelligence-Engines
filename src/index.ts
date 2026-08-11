@@ -33,3 +33,4 @@ export * as ranking from "./ranking.js";
 export * as analytics from "./analytics.js";
 export * as simulations from "./replay.js";
 export * as intelligenceModels from "./machine-learning.js";
+export * as stateSnapshots from "./state.js";

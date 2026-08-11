@@ -28,51 +28,44 @@ export function replaceState(state: EngineState, patch: Partial<EngineState>): E
 
 // --- Deterministic State Hashing ---
 
+function canonicalize(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("state contains a non-finite number");
+    return Object.is(value, -0) ? "-0" : String(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalize).join(",")}]`;
+  }
+
+  if (typeof value === "object") {
+    const record = value as Readonly<Record<string, unknown>>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`)
+      .join(",")}}`;
+  }
+
+  throw new Error(`state contains an unsupported ${typeof value} value`);
+}
+
 export function computeStateHash(state: EngineState): string {
-  // A deterministic hash function for EngineState.
-  // In a real system, you might use a crypto hash like SHA-256 over a canonical JSON representation.
-  // Here we use a fast djb2 variant over sorted keys for performance while retaining determinism.
-  
-  let h = 5381;
-  
-  function mixStr(str: string) {
-    for (let i = 0; i < str.length; i++) {
-      h = ((h << 5) + h) + str.charCodeAt(i); 
-    }
+  const canonicalState = canonicalize(state);
+  let hash = 2166136261;
+
+  for (let index = 0; index < canonicalState.length; index += 1) {
+    hash ^= canonicalState.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-  
-  function mixNum(num: number) {
-    // Basic float to bits conversion approximation for hashing
-    const str = num.toString();
-    for (let i = 0; i < str.length; i++) {
-      h = ((h << 5) + h) + str.charCodeAt(i); 
-    }
-  }
-  
-  // Hash Leads
-  const leadIds = Object.keys(state.leads).sort();
-  for (const id of leadIds) {
-    mixStr(id);
-    const lead = state.leads[id]!;
-    mixStr(lead.lifecycle);
-    mixNum(lead.updatedAt);
-    mixNum(state.scores[id] ?? 0);
-  }
-  
-  // Hash Events
-  const eventIds = Object.keys(state.events).sort();
-  for (const id of eventIds) {
-    mixStr(id);
-    mixStr(state.events[id]!.type);
-    mixNum(state.events[id]!.occurredAt);
-  }
-  
-  // Hash Config (basic)
-  mixNum(state.config.scorePolicy.cap);
-  mixNum(state.config.scorePolicy.floor);
-  mixStr(state.config.scorePolicy.conflictMode);
-  
-  return (h >>> 0).toString(16);
+
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 // --- Differential State Merging ---
@@ -174,27 +167,12 @@ export function applyStatePatch(state: EngineState, patch: StatePatch): EngineSt
 
 export interface CompressedState {
   readonly version: 1;
-  readonly payload: string; // Base64 encoded or similar stringified representation
+  readonly payload: string;
   readonly hash: string;
 }
 
 export function serializeAndCompressState(state: EngineState): CompressedState {
-  // A simplistic mock for state compression. 
-  // Real implementation would use pako (zlib) or LZ4.
-  // Here we just strip out some indexes that can be rebuilt, and JSON stringify.
-  
-  const minimalistState = {
-    c: state.config,
-    l: state.leads,
-    e: state.events,
-    s: state.scores,
-    q: state.qualifications,
-    // eventIdsByLead, scoreHistory, scoreProjections, segments, profiles can be rebuilt or are ephemeral
-  };
-  
-  const str = JSON.stringify(minimalistState);
-  const payload = Buffer.from(str).toString("base64");
-  
+  const payload = Buffer.from(JSON.stringify(state), "utf8").toString("base64");
   return {
     version: 1,
     payload,
@@ -202,37 +180,67 @@ export function serializeAndCompressState(state: EngineState): CompressedState {
   };
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const stateRecordFields = [
+  "config",
+  "leads",
+  "events",
+  "eventIdsByLead",
+  "scores",
+  "scoreProjections",
+  "scoreHistory",
+  "qualifications",
+  "segments",
+  "profiles",
+  "leadHistory",
+] as const;
+
+function assertSerializedState(value: unknown): asserts value is EngineState {
+  if (!isRecord(value)) throw new Error("snapshot payload must contain an engine state object");
+
+  for (const field of stateRecordFields) {
+    if (!isRecord(value[field])) throw new Error(`snapshot field ${field} must be an object`);
+  }
+
+  const config = value["config"];
+  if (!isRecord(config) || !isRecord(config["scorePolicy"]) || !Array.isArray(config["qualificationPolicies"]) || !isRecord(config["segmentPolicy"])) {
+    throw new Error("snapshot config is invalid");
+  }
+
+  const eventIdsByLead = value["eventIdsByLead"];
+  if (!isRecord(eventIdsByLead)) throw new Error("snapshot event index is invalid");
+  if (Object.values(eventIdsByLead).some((eventIds) => !Array.isArray(eventIds) || eventIds.some((eventId) => typeof eventId !== "string"))) {
+    throw new Error("snapshot event index is invalid");
+  }
+
+  const scores = value["scores"];
+  if (!isRecord(scores)) throw new Error("snapshot scores are invalid");
+  if (Object.values(scores).some((score) => typeof score !== "number" || !Number.isFinite(score))) {
+    throw new Error("snapshot scores are invalid");
+  }
+}
+
 export function decompressAndDeserializeState(compressed: CompressedState): EngineState {
-  const str = Buffer.from(compressed.payload, "base64").toString("utf8");
-  const parsed = JSON.parse(str);
-  
-  const leads = parsed.l ?? {};
-  const events = parsed.e ?? {};
-  const scores = parsed.s ?? {};
-  const qualifications = parsed.q ?? {};
-  
-  // Rebuild indexes
-  const eventIdsByLead: Record<string, string[]> = {};
-  for (const [id, event] of Object.entries(events)) {
-    if (!eventIdsByLead[(event as any).leadId]) {
-       eventIdsByLead[(event as any).leadId] = [];
-    }
-    eventIdsByLead[(event as any).leadId]!.push(id);
+  if (compressed.version !== 1) throw new Error(`unsupported snapshot version: ${String(compressed.version)}`);
+
+  let parsed: unknown;
+  try {
+    const serialized = Buffer.from(compressed.payload, "base64").toString("utf8");
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    throw new Error("snapshot payload is not valid base64-encoded JSON");
   }
-  
-  // Sort them just in case
-  for (const leadId of Object.keys(eventIdsByLead)) {
-    eventIdsByLead[leadId]!.sort((a, b) => (events as any)[a]!.occurredAt - (events as any)[b]!.occurredAt);
+
+  assertSerializedState(parsed);
+  const actualHash = computeStateHash(parsed);
+  if (actualHash !== compressed.hash) {
+    throw new Error(`snapshot integrity check failed: expected ${compressed.hash}, received ${actualHash}`);
   }
-  
-  return {
-    ...createEngineState(parsed.c),
-    leads,
-    events,
-    scores,
-    qualifications,
-    eventIdsByLead
-  };
+
+  return parsed;
 }
 
 // --- Audit Log Generation ---
