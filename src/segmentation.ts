@@ -209,7 +209,7 @@ export interface DecisionTreeNode {
 }
 
 export function evaluateDecisionTree(lead: Lead, score: number, events: readonly DomainEvent[], tree: DecisionTreeNode): string {
-  const features: Record<string, any> = {
+  const features: Readonly<Record<string, string | number | boolean>> = {
     ...lead.attributes,
     score,
     eventCount: events.length,
@@ -221,7 +221,7 @@ export function evaluateDecisionTree(lead: Lead, score: number, events: readonly
   while (current) {
     if (current.leafSegment) return current.leafSegment;
     
-    const val: any = features[current.feature];
+    const val: string | number | boolean | undefined = features[current.feature];
     let evalResult = false;
     
     if (val !== undefined) {
@@ -232,7 +232,7 @@ export function evaluateDecisionTree(lead: Lead, score: number, events: readonly
         case "<": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val < current.threshold; break;
         case ">=": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val >= current.threshold; break;
         case "<=": evalResult = typeof val === 'number' && typeof current.threshold === 'number' && val <= current.threshold; break;
-        case "in": evalResult = Array.isArray(current.threshold) && current.threshold.includes(val as any); break;
+        case "in": evalResult = Array.isArray(current.threshold) && current.threshold.some((candidate) => candidate === val); break;
         case "contains": evalResult = typeof val === 'string' && typeof current.threshold === 'string' && val.includes(current.threshold); break;
       }
     }
@@ -448,7 +448,16 @@ export function generateDynamicPolicy(
   
   return {
     fallback: fallbackSegment,
-    rules: rules as any,
+    rules: rules.map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      priority: rule.priority,
+      ...(rule.minimumScore === undefined ? {} : { minimumScore: rule.minimumScore }),
+      ...(rule.maximumScore === undefined ? {} : { maximumScore: rule.maximumScore }),
+      ...(rule.qualificationStates === undefined ? {} : { qualificationStates: rule.qualificationStates.filter((state): state is import("./contracts.js").QualificationState => ["unqualified", "marketing-qualified", "sales-qualified", "disqualified"].includes(state)) }),
+      ...(rule.requiredAttributes === undefined ? {} : { requiredAttributes: Object.entries(rule.requiredAttributes).map(([key, equals]) => ({ key, equals })) }),
+      ...(rule.requiredEventTypes === undefined ? {} : { requiredEventTypes: rule.requiredEventTypes }),
+    })),
     advancedRules: rules
   };
 }

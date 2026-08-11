@@ -236,21 +236,23 @@ export function analyzeLeadFraudRisk(state: EngineState, leadId: string, config:
     riskScore += 80;
   }
   
-  // Fake impossible travel check (assumes lat/lon metadata on events)
-  let prevEventWithLocation = events.find(e => (e as any).metadata?.lat && (e as any).metadata?.lon);
+  const locationOf = (event: import("./contracts.js").DomainEvent): { latitude: number; longitude: number } | undefined => {
+    const latitude = event.attributes["latitude"];
+    const longitude = event.attributes["longitude"];
+    return typeof latitude === "number" && typeof longitude === "number" ? { latitude, longitude } : undefined;
+  };
+  let prevEventWithLocation = events.find((event) => locationOf(event) !== undefined);
   if (prevEventWithLocation) {
     for (let i = events.indexOf(prevEventWithLocation) + 1; i < events.length; i++) {
       const e = events[i]!;
-      if ((e as any).metadata?.lat && (e as any).metadata?.lon) {
+      const previousLocation = locationOf(prevEventWithLocation);
+      const currentLocation = locationOf(e);
+      if (previousLocation && currentLocation) {
         const timeDiffSec = (e.occurredAt - prevEventWithLocation.occurredAt) / 1000;
         if (timeDiffSec > 0) {
-          // Haversine mock distance
-          const lat1 = Number((prevEventWithLocation as any).metadata.lat);
-          const lon1 = Number((prevEventWithLocation as any).metadata.lon);
-          const lat2 = Number((e as any).metadata.lat);
-          const lon2 = Number((e as any).metadata.lon);
-          
-          const distMeters = Math.sqrt(Math.pow(lat2 - lat1, 2) + Math.pow(lon2 - lon1, 2)) * 111000;
+          const latitudeDelta = currentLocation.latitude - previousLocation.latitude;
+          const longitudeDelta = currentLocation.longitude - previousLocation.longitude;
+          const distMeters = Math.sqrt(latitudeDelta ** 2 + longitudeDelta ** 2) * 111000;
           const speed = distMeters / timeDiffSec;
           
           if (speed > config.impossibleTravelSpeedMetersPerSecond) {
@@ -359,14 +361,14 @@ export function rollbackTransaction(tx: TransactionalContext): EngineState {
 export function executeInTransaction<T>(
   state: EngineState, 
   operation: (tx: TransactionalContext) => T
-): { result: T, state: EngineState, committed: boolean } {
+): { readonly result: T; readonly state: EngineState; readonly committed: true } | { readonly state: EngineState; readonly committed: false; readonly error: string } {
   const tx = beginTransaction(state);
   try {
     const result = operation(tx);
     const nextState = commitTransaction(tx);
     return { result, state: nextState, committed: true };
-  } catch (err) {
-    return { result: undefined as any, state: rollbackTransaction(tx), committed: false };
+  } catch (error) {
+    return { state: rollbackTransaction(tx), committed: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 

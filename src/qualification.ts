@@ -1,4 +1,4 @@
-import type { DomainEvent, Lead, QualificationPolicy, QualificationResult, Timestamp } from "./contracts.js";
+import type { DomainEvent, Lead, QualificationPolicy, QualificationResult, QualificationState, Timestamp } from "./contracts.js";
 
 // --- Advanced Qualification Evaluation ---
 
@@ -485,10 +485,10 @@ export function evaluateQualificationMatrix(
 // --- Capacity-Aware Qualification Routing ---
 
 export interface QualificationCapacityNode {
-  readonly state: string;
+  readonly state: QualificationState;
   readonly maxCapacity: number;
   readonly currentLoad: number;
-  readonly overflowState?: string;
+  readonly overflowState?: QualificationState;
 }
 
 export function applyCapacityRouting(
@@ -507,7 +507,7 @@ export function applyCapacityRouting(
     
     if (node.currentLoad >= node.maxCapacity) {
       if (node.overflowState) {
-        currentState = node.overflowState as import("./contracts.js").QualificationState;
+        currentState = node.overflowState;
         overflowTriggered = true;
       } else {
         // If no overflow defined but at capacity, fail qualification
@@ -525,7 +525,7 @@ export function applyCapacityRouting(
   return {
     finalResult: {
       ...initialResult,
-      state: currentState as any,
+      state: currentState,
       reasons: overflowTriggered 
         ? [...initialResult.reasons, `Capacity overflowed from ${originalState}`] 
         : initialResult.reasons
@@ -732,4 +732,3 @@ export function evaluateMultiDimensionalSLA(
   
   return { breachedCount, results };
 }
-

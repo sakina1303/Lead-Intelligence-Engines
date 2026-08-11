@@ -152,7 +152,7 @@ export function validateEventPayload(payload: TypedDomainEventPayload): Outcome<
       if (!payload.category || typeof payload.category !== 'string') errors.push("Category is required");
       break;
     default:
-      errors.push(`Unknown payload kind: ${(payload as any).kind}`);
+      errors.push("Unknown payload kind");
   }
   
   return errors.length === 0 ? success(payload) : failure(...errors);
